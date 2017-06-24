@@ -126,13 +126,13 @@ let string_of_pub t data =
 
    <topic_name> - a valid string (optionally having #ephemeral suffix)
 *)
-let string_of_mpub t data =
+let string_of_mpub t bodies =
   let ts = Topic.to_string t in
-  let count = List.length data in
-  let data_size = List.fold_left (fun a b -> a + Bytes.length b) 0 data in
-  let buf = Bytes.create (4 + 4 + (4*count) + data_size) in
+  let body_count = List.length bodies in
+  let data_size = List.fold_left (fun a b -> a + Bytes.length b) 0 bodies in
+  let buf = Bytes.create (4 + 4 + (4*body_count) + data_size) in
   EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int @@ data_size);
-  EndianBytes.BigEndian.set_int32 buf 4 (Int32.of_int @@ List.length data);
+  EndianBytes.BigEndian.set_int32 buf 4 (Int32.of_int body_count);
   let index = ref 8 in
   List.iter (
     fun b -> 
@@ -140,7 +140,7 @@ let string_of_mpub t data =
       index := !index + 4;
       Bytes.blit b 0 buf !index (Bytes.length b);
       index := !index + Bytes.length b;
-  ) data;
+  ) bodies;
   Format.sprintf "MPUB %s\n%s" ts (Bytes.to_string buf)
 
 (* TODO: Return bytes instead? *)
