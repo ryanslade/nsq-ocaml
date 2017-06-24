@@ -1,0 +1,14 @@
+B ../_build/default/examples
+B ../_build/default/src
+FLG -w -40
+PKG bigarray
+PKG bytes
+PKG containers
+PKG integers
+PKG lwt
+PKG lwt.log
+PKG lwt.unix
+PKG ocplib-endian
+PKG result
+PKG unix
+S ../src
