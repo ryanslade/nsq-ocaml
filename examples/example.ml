@@ -5,11 +5,11 @@ open Nsq
 let ip_address = "172.17.0.2"
 
 let handle msg =
-  Lwt_log.debug_f "Body: %s\n" (Bytes.to_string msg) >>= fun () ->
+  Lwt_log.debug_f "Body: %s" (Bytes.to_string msg) >>= fun () ->
   return HandlerOK
 
 let publish_error_backoff = 1.0
-let publish_interval_seconds = 1.0
+let publish_interval_seconds = 0.5
 
 let rec test_publish () =
   let p = match Publisher.create (Host ip_address) 

@@ -2,6 +2,11 @@ open Containers
 open Printf
 open Lwt
 
+let magic = Bytes.of_string "  V2"
+let ephemeral_suffix = "#ephemeral"
+let default_backoff_seconds = 1.0
+let max_backoff_seconds = 3600.0
+
 module Milliseconds = struct
   type t = Milliseconds of int64
 
@@ -10,6 +15,8 @@ module Milliseconds = struct
 
   let value (Milliseconds i) = i
 end
+
+let default_requeue_delay = Milliseconds.of_int64 5000L
 
 module MessageID = struct
   type t =
@@ -22,11 +29,42 @@ module MessageID = struct
     | MessageID id -> Bytes.to_string id
 end
 
-let magic = "  V2"
-let ephemeral_suffix = "#ephemeral"
-let default_backoff_seconds = 1.0
-let default_requeue_delay = Milliseconds.of_int64 5000L
-let max_backoff_seconds = 3600.0
+let ephemeral s =
+  s ^ ephemeral_suffix
+
+module Topic = struct
+  type t =
+    | Topic of string
+    | TopicEphemeral of string
+
+  let to_string = function
+    | Topic s -> s
+    | TopicEphemeral s -> ephemeral s
+end
+
+module Channel = struct 
+  type t =
+    | Channel of string
+    | ChannelEphemeral of string
+
+  let to_string = function
+    | Channel s -> s
+    | ChannelEphemeral s -> ephemeral s
+end
+
+module FrameType = struct
+  type t =
+    | FrameResponse
+    | FrameError
+    | FrameMessage
+    | FrameUnknown of int32
+
+  let of_int32 = function
+    | 0l -> FrameResponse
+    | 1l -> FrameError
+    | 2l -> FrameMessage
+    | i -> FrameUnknown i
+end
 
 type raw_frame = {
   frame_type: int32;
@@ -43,43 +81,6 @@ type raw_message = {
 type address =
   | Host of string
   | HostPort of string * int
-
-let make_ephemeral s =
-  s ^ ephemeral_suffix
-
-module Topic = struct
-  type t =
-    | Topic of string
-    | TopicEphemeral of string
-
-  let to_string = function
-    | Topic s -> s
-    | TopicEphemeral s -> make_ephemeral s
-end
-
-module Channel = struct 
-  type t =
-    | Channel of string
-    | ChannelEphemeral of string
-
-  let to_string = function
-    | Channel s -> s
-    | ChannelEphemeral s -> make_ephemeral s 
-end
-
-module FrameType = struct
-  type t =
-    | FrameResponse
-    | FrameError
-    | FrameMessage
-    | FrameUnknown of int32
-
-  let of_int32 = function
-    | 0l -> FrameResponse
-    | 1l -> FrameError
-    | 2l -> FrameMessage
-    | i -> FrameUnknown i
-end
 
 type command =
   (* TODO: Identify *)
@@ -110,11 +111,12 @@ type handler_result =
   | HandlerOK
   | HandlerRequeue
 
-let string_of_pub t data =
+let bytes_of_pub t data =
   let ts = Topic.to_string t in
   let buf = Bytes.create 4 in
   EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int @@ Bytes.length data);
   Format.sprintf "PUB %s\n%s%s" ts (Bytes.to_string buf) (Bytes.to_string data)
+  |> Bytes.of_string
 
 (** 
    MPUB <topic_name>\n
@@ -125,7 +127,7 @@ let string_of_pub t data =
 
    <topic_name> - a valid string (optionally having #ephemeral suffix)
 *)
-let string_of_mpub t bodies =
+let bytes_of_mpub t bodies =
   let ts = Topic.to_string t in
   let body_count = List.length bodies in
   let data_size = List.fold_left (fun a b -> a + Bytes.length b) 0 bodies in
@@ -141,26 +143,27 @@ let string_of_mpub t bodies =
       index := !index + Bytes.length b;
   ) bodies;
   Format.sprintf "MPUB %s\n%s" ts (Bytes.to_string buf)
+  |> Bytes.of_string
 
-(* TODO: Return bytes instead? *)
-let string_of_command = function
+let bytes_of_command = function
   | Magic -> magic 
-  | NOP -> "NOP\n"
-  | RDY i -> sprintf "RDY %i\n" i
-  | FIN id -> sprintf "FIN %s\n" (MessageID.to_string id)
-  | TOUCH id -> sprintf "TOUCH %s\n" (MessageID.to_string id)
-  | SUB (t, c) -> sprintf "SUB %s %s\n" (Topic.to_string t) (Channel.to_string c)
-  | REQ (id, delay) -> sprintf "REQ %s %Li\n" (MessageID.to_string id) (Milliseconds.value delay)
-  | PUB (t, data) -> string_of_pub t data
-  | MPUB (t, data) -> string_of_mpub t data
-  | CLS -> "CLS\n"
+  | NOP -> Bytes.of_string "NOP\n"
+  | RDY i -> Format.sprintf "RDY %i\n" i |> Bytes.of_string
+  | FIN id -> Format.sprintf "FIN %s\n" (MessageID.to_string id) |> Bytes.of_string
+  | TOUCH id -> Format.sprintf "TOUCH %s\n" (MessageID.to_string id) |> Bytes.of_string
+  | SUB (t, c) -> Format.sprintf "SUB %s %s\n" (Topic.to_string t) (Channel.to_string c) |> Bytes.of_string
+  | REQ (id, delay) -> Format.sprintf "REQ %s %Li\n" (MessageID.to_string id) (Milliseconds.value delay) |> Bytes.of_string
+  | PUB (t, data) -> bytes_of_pub t data
+  | MPUB (t, data) -> bytes_of_mpub t data
+  | CLS -> Bytes.of_string "CLS\n"
   | AUTH secret -> 
     let buf = Bytes.create 4 in
     EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int (String.length secret));
     Format.sprintf "AUTH\n%s%s" (Bytes.to_string buf) secret
+    |> Bytes.of_string
 
 let send command (_, oc) =
-  string_of_command command 
+  bytes_of_command command 
   |> Lwt_io.write oc
 
 let catch_result promise =
@@ -171,7 +174,8 @@ let catch_result promise =
 let connect host =
   let (host, port) = match host with
     | Host h          -> (h, 4150)
-    | HostPort (h, p) -> (h, p) in
+    | HostPort (h, p) -> (h, p)
+  in
   let host = Unix.inet_addr_of_string host in
   let addr = Unix.ADDR_INET(host, port) in
   Lwt_io.open_connection addr 
@@ -190,10 +194,10 @@ let read_raw_frame (ic, _) =
   return @@ frame_from_bytes bytes
 
 let parse_response_body body =
-  match (Bytes.to_string body) with
+  match body with
   | "OK" -> Result.Ok ResponseOk
   | "_heartbeat_" -> Result.Ok Heartbeat
-  | _ -> Result.Error (sprintf "Unknown response: %s" (Bytes.to_string body))
+  | _ -> Result.Error (sprintf "Unknown response: %s" body)
 
 let parse_message_body_exn body =
   let timestamp = EndianBytes.BigEndian.get_int64 body 0 in
@@ -217,7 +221,7 @@ let parse_error_body body =
     | "E_FIN_FAILED" -> Result.return @@ ErrorFINFailed detail
     | _ -> Result.Error (sprintf "Unknown error code: %s. %s" code detail)
 
-let parse_raw_frame raw =
+let server_message_of_frame raw =
   match (FrameType.of_int32 raw.frame_type) with
   | FrameResponse -> parse_response_body raw.data
   | FrameMessage -> parse_message_body raw.data
@@ -227,7 +231,7 @@ let parse_raw_frame raw =
 let subscribe topic channel conn =
   send (SUB (topic, channel)) conn >>= fun () ->
   read_raw_frame conn >>= fun raw ->
-  match parse_raw_frame raw with
+  match server_message_of_frame raw with
   | Result.Ok ResponseOk -> return_unit
   | _ -> fail_with "Unexpected SUB response"
 
@@ -385,7 +389,7 @@ module Consumer = struct
       Lwt_mvar.take mbox >>= function
       | RawFrame raw ->
         begin 
-          match parse_raw_frame raw with
+          match server_message_of_frame raw with
           | Result.Ok frame ->
             Lwt.async 
               begin
@@ -505,8 +509,8 @@ module Publisher = struct
   let publish_cmd t topic cmd =
     let with_conn c =
       let rec read_until_ok () =
-        read_raw_frame c.conn >>= fun raw ->
-        match parse_raw_frame raw with
+        read_raw_frame c.conn >>= fun frame ->
+        match server_message_of_frame frame with
         | Result.Ok ResponseOk -> return @@ Result.Ok ()
         | Result.Ok Heartbeat -> 
           send NOP c.conn >>= fun () -> 
