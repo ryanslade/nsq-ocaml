@@ -29,7 +29,6 @@ let default_requeue_delay = Milliseconds.of_int64 5000L
 let max_backoff_seconds = 3600.0
 
 type raw_frame = {
-  size: int32;
   frame_type: int32;
   data: bytes; 
 }
@@ -177,13 +176,18 @@ let connect host =
   let addr = Unix.ADDR_INET(host, port) in
   Lwt_io.open_connection addr 
 
+let frame_from_bytes bytes =
+  let frame_type = EndianBytes.BigEndian.get_int32 bytes 0 in
+  let to_read = (Bytes.length bytes) - 4 in
+  let data = Bytes.sub bytes 4 to_read in
+  {frame_type; data}
+
 let read_raw_frame (ic, _) =
   Lwt_io.BE.read_int32 ic >>= fun size ->
-  Lwt_io.BE.read_int32 ic >>= fun frame_type ->
-  let data_size = (Int32.to_int size) - 4 in
-  let data = Bytes.create data_size in
-  Lwt_io.read_into_exactly ic data 0 data_size >>= fun () ->
-  return {size; frame_type; data}
+  let size = Int32.to_int size in
+  let bytes = Bytes.create size in
+  Lwt_io.read_into_exactly ic bytes 0 size >>= fun () ->
+  return @@ frame_from_bytes bytes
 
 let parse_response_body body =
   match (Bytes.to_string body) with
