@@ -2,7 +2,6 @@ open Containers
 open Printf
 open Lwt
 
-let magic = Bytes.of_string "  V2"
 let ephemeral_suffix = "#ephemeral"
 let default_backoff_seconds = 1.0
 let max_backoff_seconds = 3600.0
@@ -146,7 +145,7 @@ let bytes_of_mpub t bodies =
   |> Bytes.of_string
 
 let bytes_of_command = function
-  | Magic -> magic 
+  | Magic -> Bytes.of_string "  V2" 
   | NOP -> Bytes.of_string "NOP\n"
   | RDY i -> Format.sprintf "RDY %i\n" i |> Bytes.of_string
   | FIN id -> Format.sprintf "FIN %s\n" (MessageID.to_string id) |> Bytes.of_string
@@ -277,6 +276,7 @@ module Consumer = struct
   type config = {
     max_in_flight : int;
     max_attempts : int;
+    backoff_multiplier : float;
   }
 
   let validate_positive c value name =
@@ -284,27 +284,30 @@ module Consumer = struct
     then Result.Ok c
     else Result.Error (Format.sprintf "%s must be greater than 0" name)
 
+  let validate_between min max value name c =
+    if value >= min && value <= max
+    then Result.Ok c
+    else Result.Error (Format.sprintf "%s must be between %d and %d, got %d" name min max value)
+
   let max_in_flight_positive c =
     validate_positive c c.max_in_flight "max_in_flight"
 
-  let max_attempts_positive c =
-    validate_positive c c.max_attempts "max_attempts"
-
-  let max_attempts_less_than max c =
-    if c.max_attempts < max
-    then Result.Ok c
-    else Result.Error (Format.sprintf "max_attempts must be less than %d, got %d" max c.max_attempts)
+  let max_attempts_between min max c =
+    validate_between min max c.max_attempts "max_attempts" c
 
   let validate_config c =
     let open Result in
-    c |> max_in_flight_positive
-    >>= max_attempts_positive
-    >>= max_attempts_less_than 65535
+    max_in_flight_positive c
+    >>= max_attempts_between 0 65535
 
-  let default_config = {
+  let default_config_value = {
     max_in_flight = 1;
     max_attempts = 5;
+    backoff_multiplier = 0.5;
   }
+
+  let default_config () =
+    default_config_value
 
   type breaker_position =
     | Closed
@@ -316,10 +319,7 @@ module Consumer = struct
     error_count : int;
   }
 
-  let backoff_multiplier = 0.5
-
-  (* TODO: This should be configurable *)
-  let backoff_duration error_count =
+  let backoff_duration backoff_multiplier error_count =
     let bo = (backoff_multiplier *. (float_of_int error_count)) in
     min bo max_backoff_seconds
 
@@ -332,7 +332,7 @@ module Consumer = struct
     config : config;
   }
 
-  let create ?(config=default_config) addresses topic channel handler =
+  let create ?(config=default_config_value) addresses topic channel handler =
     match validate_config config with
     | Result.Error s -> Result.Error (Format.sprintf "Invalid config: %s" s)
     | Result.Ok config ->
@@ -346,13 +346,13 @@ module Consumer = struct
         config;
       }
 
-  let after duration f =
+  let do_after duration f =
     Lwt_log.debug_f "Sleeping for %f seconds" duration >>= fun () ->
     Lwt_unix.sleep duration >>= fun () ->
     Lwt_log.debug "Sleeping done" >>= fun () ->
     f ();
 
-  type mailbox_message =
+  type loop_message =
     | RawFrame of raw_frame
     | Command of command
     | TrialBreaker
@@ -368,23 +368,37 @@ module Consumer = struct
       put_async @@ ConnectionError e;
       return_unit
 
-  let consume c conn mbox =
-    send Magic conn >>= fun () ->
-    subscribe c.topic c.channel conn >>= fun () ->
-    (* Start cautiously by sending RDY 1 *)
-    send (RDY 1) conn >>= fun () ->
-    Lwt_log.debug "Sending initial RDY 1" >>= fun () ->
-    (* Start background reader *)
-    Lwt.async (fun () -> read_loop conn mbox);
-    let open_breaker bs =
-      (* Send RDY 0 and send retry trial command after a delay  *)
-      ignore_result @@ Lwt_log.debug "Breaker open, sending RDY 0";
-      ignore_result @@ send (RDY 0) conn;
-      let bs = { error_count = bs.error_count + 1; position = Open } in
-      let duration = backoff_duration bs.error_count in
-      ignore_result @@ after duration (fun () -> Lwt_mvar.put mbox TrialBreaker);
-      bs
+  let open_breaker c conn mbox bs =
+    (* Send RDY 0 and send retry trial command after a delay  *)
+    ignore_result @@ Lwt_log.debug "Breaker open, sending RDY 0";
+    ignore_result @@ send (RDY 0) conn;
+    let bs = { error_count = bs.error_count + 1; position = Open } in
+    let duration = backoff_duration c.config.backoff_multiplier bs.error_count in
+    ignore_result @@ do_after duration (fun () -> Lwt_mvar.put mbox TrialBreaker);
+    bs
+
+  let update_breaker_state c conn open_breaker cmd bs =
+    let is_error = match cmd with
+      | REQ _ -> true
+      | _ -> false 
     in
+    match is_error, bs.position with
+    | true, Closed -> 
+      open_breaker bs
+    | true, Open -> bs
+    | true, HalfOpen ->
+      (* Failed test *)
+      open_breaker bs
+    | false, Closed -> bs
+    | false, Open -> bs
+    | false, HalfOpen ->
+      (* Passed test  *)
+      ignore_result @@ send (RDY c.desired_rdy) conn;
+      { position = Closed; error_count = 0; }
+
+  let consume c conn mbox =
+    let open_breaker = open_breaker c conn mbox in
+    let update_breaker_state = update_breaker_state c conn open_breaker in
     let rec mbox_loop bs =
       Lwt_mvar.take mbox >>= function
       | RawFrame raw ->
@@ -406,45 +420,33 @@ module Consumer = struct
         end
       | Command cmd ->
         send cmd conn >>= fun () ->
-        let is_error = match cmd with
-          | REQ _ -> true
-          | _ -> false 
-        in
-        (* Backoff logic *)
-        let bs = match is_error, bs.position with
-          | true, Closed -> 
-            open_breaker bs
-          | true, Open -> bs
-          | true, HalfOpen ->
-            (* Failed test *)
-            open_breaker bs
-          | false, Closed -> bs
-          | false, Open -> bs
-          | false, HalfOpen ->
-            (* Passed test  *)
-            ignore_result @@ send (RDY c.desired_rdy) conn;
-            { position = Closed; error_count = 0; }
-        in
-        mbox_loop bs
+        mbox_loop @@ update_breaker_state cmd bs
       | TrialBreaker ->
-        ignore_result @@ Lwt_log.debug_f "Breaker trial, sending RDY 1 (Error count: %i)" bs.error_count;
+        Lwt_log.debug_f "Breaker trial, sending RDY 1 (Error count: %i)" bs.error_count >>= fun () ->
         let bs = { bs with position = HalfOpen } in
         ignore_result @@ send (RDY 1) conn;
         mbox_loop bs
       | ConnectionError e ->
         fail e 
     in
-    let bs = { position = HalfOpen; error_count = 0; } in
-    mbox_loop bs
+    send Magic conn >>= fun () ->
+    subscribe c.topic c.channel conn >>= fun () ->
+    (* Start cautiously by sending RDY 1 *)
+    Lwt_log.debug "Sending initial RDY 1" >>= fun () ->
+    send (RDY 1) conn >>= fun () ->
+    (* Start background reader *)
+    Lwt.async (fun () -> read_loop conn mbox);
+    let initial_state = { position = HalfOpen; error_count = 0; } in
+    mbox_loop initial_state
 
   let rec main_loop c address mbox =
     catch_result @@ connect address >>= function
     | Result.Ok conn ->
       let handle_ok () = consume c conn mbox in
       let handle_ex e = 
+        Lwt_log.error_f "Reader failed: %s" (Printexc.to_string e) >>= fun () ->
         Lwt_io.close (fst conn) >>= fun () ->
         Lwt_io.close (snd conn) >>= fun () ->
-        Lwt_log.error_f "Reader failed: %s" (Printexc.to_string e) >>= fun () ->
         Lwt_unix.sleep default_backoff_seconds
       in
       catch handle_ok handle_ex >>= fun () ->
@@ -463,8 +465,8 @@ module Consumer = struct
 
   let run c =
     Lwt.async_exception_hook := async_exception_hook;
-    let readers = List.map (fun a -> start_consumer c a) c.addresses in
-    Lwt.join readers
+    let consumers = List.map (fun a -> start_consumer c a) c.addresses in
+    Lwt.join consumers
 
 end
 

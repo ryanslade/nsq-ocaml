@@ -28,7 +28,8 @@ let rec test_publish () =
   loop ()
 
 let create_consumer chan_name handler =
-  let config = Consumer.{max_in_flight = 100; max_attempts = 5;} in
+  let dc = Consumer.default_config () in
+  let config = Consumer.{dc with max_in_flight = 100;} in
   match Consumer.create 
           ~config
           [(Host ip_address)]
