@@ -166,8 +166,9 @@ let send command (_, oc) =
   |> Lwt_io.write oc
 
 let catch_result promise =
-  catch
-    (fun () -> promise >>= fun x -> return (Result.Ok x))
+  try_bind 
+    promise
+    (fun x -> return (Result.Ok x))
     (fun e -> return (Result.Error e))
 
 let connect host =
@@ -175,9 +176,12 @@ let connect host =
     | Host h          -> (h, 4150)
     | HostPort (h, p) -> (h, p)
   in
-  let host = Unix.inet_addr_of_string host in
-  let addr = Unix.ADDR_INET(host, port) in
-  Lwt_io.open_connection addr 
+  Lwt_unix.gethostbyname host >>= fun info ->
+  match Array.get_safe info.h_addr_list 0 with
+  | None -> fail_with "Host lookup failed"
+  | Some host ->
+    let addr = Unix.ADDR_INET(host, port) in
+    Lwt_io.open_connection addr
 
 let frame_from_bytes bytes =
   let frame_type = EndianBytes.BigEndian.get_int32 bytes 0 in
@@ -240,7 +244,7 @@ let requeue_delay attempts =
   Milliseconds.of_int64 Int64.(d * attempts)
 
 let handle_message handler msg max_attempts =
-  catch_result @@ handler msg.body >>=
+  catch_result (fun () -> handler msg.body) >>=
   begin
     function
     | Result.Ok r -> return r
@@ -360,7 +364,7 @@ module Consumer = struct
 
   let rec read_loop conn mbox =
     let put_async m = Lwt.async @@ fun () -> Lwt_mvar.put mbox m in
-    catch_result @@ read_raw_frame conn >>= function
+    catch_result @@ (fun () -> read_raw_frame conn) >>= function
     | Result.Ok raw ->
       put_async @@ RawFrame raw;
       read_loop conn mbox
@@ -440,7 +444,7 @@ module Consumer = struct
     mbox_loop initial_state
 
   let rec main_loop c address mbox =
-    catch_result @@ connect address >>= function
+    catch_result (fun () -> connect address) >>= function
     | Result.Ok conn ->
       let handle_ok () = consume c conn mbox in
       let handle_ex e = 
