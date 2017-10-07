@@ -168,8 +168,8 @@ let send command (_, oc) =
 let catch_result promise =
   try_bind 
     promise
-    (fun x -> return (Result.Ok x))
-    (fun e -> return (Result.Error e))
+    (fun x -> return_ok x)
+    (fun e -> return_error e)
 
 let connect host =
   let (host, port) = match host with
