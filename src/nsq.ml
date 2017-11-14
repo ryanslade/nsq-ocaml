@@ -163,6 +163,7 @@ let bytes_of_command = function
 
 let send command (_, oc) =
   bytes_of_command command 
+  |> Bytes.to_string
   |> Lwt_io.write oc
 
 let catch_result promise =
