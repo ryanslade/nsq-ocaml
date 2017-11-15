@@ -198,6 +198,7 @@ let read_raw_frame (ic, _) =
   return @@ frame_from_bytes bytes
 
 let parse_response_body body =
+  let body = Bytes.to_string body in
   match body with
   | "OK" -> Result.Ok ResponseOk
   | "_heartbeat_" -> Result.Ok Heartbeat
