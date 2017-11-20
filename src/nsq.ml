@@ -5,6 +5,10 @@ open Lwt
 let ephemeral_suffix = "#ephemeral"
 let default_backoff_seconds = 1.0
 let max_backoff_seconds = 3600.0
+let default_nsqd_port = 4150
+let default_lookupd_http_port = 4161
+let default_lookupd_poll_seconds = 60.
+let network_buffer_size = 8192
 
 module Milliseconds = struct
   type t = Milliseconds of int64
@@ -81,6 +85,10 @@ type address =
   | Host of string
   | HostPort of string * int
 
+let string_of_address = function
+  | Host h -> h
+  | HostPort (h, p) -> Format.sprintf "%s:%d" h p
+
 type command =
   (* TODO: Identify *)
   | Magic
@@ -110,7 +118,86 @@ type handler_result =
   | HandlerOK
   | HandlerRequeue
 
-let bytes_of_pub t data =
+type lookup_producer = {
+  broadcast_address: string;
+  hostname: string;
+  tcp_port: int;
+  http_port: int;
+  version: string;
+}
+
+type lookup_response = {
+  channels: string list;
+  producers: lookup_producer list;
+}
+
+let producer_addresses lr =
+  List.map (fun p -> HostPort (p.broadcast_address, p.tcp_port)) lr.producers
+
+let lookup_producer_from_json_exn j =
+  let open Yojson.Basic in
+  let broadcast_address = Util.member "broadcast_address" j |> Util.to_string in
+  let hostname = Util.member "hostname" j |> Util.to_string in
+  let tcp_port = Util.member "tcp_port" j |> Util.to_int in
+  let http_port = Util.member "http_port" j |> Util.to_int in
+  let version = Util.member "version" j |> Util.to_string in
+  {
+    broadcast_address;
+    hostname;
+    tcp_port;
+    http_port;
+    version;
+  }
+
+let lookup_response_from_json_exn j =
+  let open Yojson.Basic in
+  let channels = Util.member "channels" j |> Util.to_list |> List.map Util.to_string in
+  let producers = Util.member "producers" j |> Util.to_list |> List.map lookup_producer_from_json_exn in
+  {
+    channels;
+    producers;
+  }
+
+let lookup_response_from_string s =
+  let open Result in
+  guard_str (fun () -> Yojson.Basic.from_string s) >>= fun json ->
+  guard_str (fun () -> lookup_response_from_json_exn json)
+
+let query_nsqlookupd a topic =
+  let host, port = match a with
+    | Host h -> h, default_lookupd_http_port
+    | HostPort (h, p) -> (h, p)
+  in
+  let topic_string = Topic.to_string topic in
+  let uri = 
+    Uri.make 
+      ~scheme:"http" 
+      ~host 
+      ~port 
+      ~path:"lookup"
+      ~query:([("topic", [topic_string])])
+      ()
+  in
+  let open Cohttp in
+  catch
+    begin
+      fun () ->
+        Cohttp_lwt_unix.Client.get uri >>= fun (resp, body) ->
+        match Response.status resp with
+        | `OK ->
+          Cohttp_lwt.Body.to_string body >>= fun body ->
+          return @@ lookup_response_from_string body
+        | status ->
+          return_error (Format.sprintf "Expected %s, got %s" (Code.string_of_status `OK) (Code.string_of_status status))
+    end
+    begin
+      fun e ->
+        let s = Printexc.to_string e in
+        Lwt_log.error_f "Querying lookupd: %s" s >>= fun () ->
+        return_error s
+    end
+
+let bytes_of_pub t data = 
   let ts = Topic.to_string t in
   let buf = Bytes.create 4 in
   EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int @@ Bytes.length data);
@@ -174,7 +261,7 @@ let catch_result promise =
 
 let connect host =
   let (host, port) = match host with
-    | Host h          -> (h, 4150)
+    | Host h          -> (h, default_nsqd_port)
     | HostPort (h, p) -> (h, p)
   in
   Lwt_unix.gethostbyname host >>= fun info ->
@@ -182,7 +269,10 @@ let connect host =
   | None -> fail_with "Host lookup failed"
   | Some host ->
     let addr = Unix.ADDR_INET(host, port) in
-    Lwt_io.open_connection addr
+    Lwt_io.open_connection 
+      ~in_buffer:(Lwt_bytes.create network_buffer_size)
+      ~out_buffer:(Lwt_bytes.create network_buffer_size)
+      addr
 
 let frame_from_bytes bytes =
   let frame_type = EndianBytes.BigEndian.get_int32 bytes 0 in
@@ -202,7 +292,7 @@ let parse_response_body body =
   match body with
   | "OK" -> Result.Ok ResponseOk
   | "_heartbeat_" -> Result.Ok Heartbeat
-  | _ -> Result.Error (sprintf "Unknown response: %s" body)
+  | _ -> Result.Error (Format.sprintf "Unknown response: %s" body)
 
 let parse_message_body_exn body =
   let timestamp = EndianBytes.BigEndian.get_int64 body 0 in
@@ -217,21 +307,21 @@ let parse_message_body body =
 
 let parse_error_body body =
   match String.Split.left ~by:" " (Bytes.to_string body) with
-  | None -> Result.Error (sprintf "Malformed error code: %s" (Bytes.to_string body))
+  | None -> Result.Error (Format.sprintf "Malformed error code: %s" (Bytes.to_string body))
   | Some (code, detail) ->
     match code with
     | "E_INVALID" -> Result.return @@ ErrorInvalid detail
     | "E_BAD_TOPIC" -> Result.return @@ ErrorBadTopic detail
     | "E_BAD_CHANNEL" -> Result.return @@ ErrorBadChannel detail
     | "E_FIN_FAILED" -> Result.return @@ ErrorFINFailed detail
-    | _ -> Result.Error (sprintf "Unknown error code: %s. %s" code detail)
+    | _ -> Result.Error (Format.sprintf "Unknown error code: %s. %s" code detail)
 
 let server_message_of_frame raw =
   match (FrameType.of_int32 raw.frame_type) with
   | FrameResponse -> parse_response_body raw.data
   | FrameMessage -> parse_message_body raw.data
   | FrameError -> parse_error_body raw.data
-  | FrameUnknown i -> Result.Error (sprintf "Unknown frame type: %li" i)
+  | FrameUnknown i -> Result.Error (Format.sprintf "Unknown frame type: %li" i)
 
 let subscribe topic channel conn =
   send (SUB (topic, channel)) conn >>= fun () ->
@@ -269,7 +359,7 @@ let handle_frame frame handler max_attempts =
   let warn_return_none name msg = Lwt_log.warning_f "%s: %s" name msg >>= fun () -> return_none in
   match frame with
   | ResponseOk -> return_none
-  | Heartbeat -> return_some NOP
+  | Heartbeat -> Lwt_log.debug "Received heartbeat" >>= fun () -> return_some NOP
   | ErrorInvalid s ->  warn_return_none "ErrorInvalid" s
   | ErrorBadTopic s -> warn_return_none "ErrorBadTopic" s 
   | ErrorBadChannel s -> warn_return_none "ErrorBadChannel" s 
@@ -336,27 +426,46 @@ module Consumer = struct
     channel : Channel.t;
     handler : (bytes -> handler_result Lwt.t);
     config : config;
+    use_lookupd : bool;
   }
 
-  let create ?(config=default_config_value) addresses topic channel handler =
+  let create_internal ?(config=default_config_value) ?(use_lookupd=false) addresses topic channel handler =
+    let num_addresses = List.length addresses in
     match validate_config config with
     | Result.Error s -> Result.Error (Format.sprintf "Invalid config: %s" s)
     | Result.Ok config ->
-      let desired_rdy = max 1 (config.max_in_flight / (List.length addresses)) in
+      let desired_rdy = max 1 (config.max_in_flight / num_addresses) in
       Result.return { 
-        addresses; 
+        addresses;
         desired_rdy;
         topic; 
         channel; 
         handler;
         config;
+        use_lookupd;
       }
+
+  let create ?(config=default_config_value) addresses topic channel handler =
+    create_internal ~config addresses topic channel handler
+
+  let create_using_nsqlookup ?(config=default_config_value) addresses topic channel handler =
+    create_internal ~config ~use_lookupd:true addresses topic channel handler
+
+  let wait_all promises =
+    let rec internal completed pending =
+      match pending with
+      | [] -> return completed
+      | _ ->
+        Lwt.nchoose_split pending >>= fun (complete, pending) ->
+        internal (completed @ complete) pending
+    in
+    internal [] promises
 
   let do_after duration f =
     Lwt_log.debug_f "Sleeping for %f seconds" duration >>= fun () ->
     Lwt_unix.sleep duration >>= fun () ->
     Lwt_log.debug "Sleeping done" >>= fun () ->
-    f ();
+    f (); (* Why do we need this semicolon?  *)
 
   type loop_message =
     | RawFrame of raw_frame
@@ -465,14 +574,46 @@ module Consumer = struct
   let async_exception_hook e =
     ignore_result @@ Lwt_log.error_f "Async exception: %s" (Printexc.to_string e)
 
-  let start_consumer c address =
+  let start_nsqd_consumer c address =
     let mbox = Lwt_mvar.create_empty () in
     main_loop c address mbox
 
+  (* Return only succesful results, but log the errors found *)
+  let start_polling_lookupd c lookup_addresses =
+    let rec internal running =
+      Lwt_log.debug_f "Querying %d lookupd hosts" (List.length lookup_addresses) >>= fun () ->
+      List.map (fun a -> query_nsqlookupd a c.topic) lookup_addresses
+      |> wait_all >>= fun results ->
+      let to_run = 
+        List.keep_ok results
+        |> List.flat_map producer_addresses
+        |> List.sort_uniq 
+        |> List.filter (fun a -> not @@ List.mem a running)
+      in
+      Lwt_log.debug_f "Found %d new publishers" (List.length to_run) >>= fun () ->
+      List.iter 
+        (fun a -> 
+           async (fun () -> 
+               Lwt_log.debug_f "Starting consumer for: %s" (string_of_address a) >>= fun () ->
+               start_nsqd_consumer c a
+             )
+        ) 
+        to_run;
+      let running = List.union running to_run in
+      Lwt_unix.sleep default_lookupd_poll_seconds >>= fun () ->
+      internal running
+    in
+    internal []
+
   let run c =
     Lwt.async_exception_hook := async_exception_hook;
-    let consumers = List.map (fun a -> start_consumer c a) c.addresses in
-    Lwt.join consumers
+    if c.use_lookupd
+    then
+      Lwt_log.debug "Starting lookupd poll" >>= fun () ->
+      start_polling_lookupd c c.addresses
+    else
+      let consumers = List.map (fun a -> start_nsqd_consumer c a) c.addresses in
+      Lwt.join consumers
 
 end
 
@@ -519,13 +660,13 @@ module Publisher = struct
       let rec read_until_ok () =
         read_raw_frame c.conn >>= fun frame ->
         match server_message_of_frame frame with
-        | Result.Ok ResponseOk -> return @@ Result.Ok ()
+        | Result.Ok ResponseOk -> return_ok ()
         | Result.Ok Heartbeat -> 
           send NOP c.conn >>= fun () -> 
           c.last_send := Unix.time ();
           read_until_ok ()
-        | Result.Ok _ -> return (Result.Error "Expected OK or Heartbeat, got another message") 
-        | Result.Error e -> return (Result.Error (sprintf "Received error: %s" e))
+        | Result.Ok _ -> return_error "Expected OK or Heartbeat, got another message"
+        | Result.Error e -> return_error (Format.sprintf "Received error: %s" e)
       in
       send cmd c.conn >>= fun () ->
       c.last_send := Unix.time ();
@@ -533,7 +674,7 @@ module Publisher = struct
     in
     let try_publish () = Lwt_pool.use t.pool with_conn in
     let handle_ex e =
-      let message = sprintf "Error publishing: %s" (Printexc.to_string e) in
+      let message = Format.sprintf "Error publishing: %s" (Printexc.to_string e) in
       return (Result.Error message)
     in
     catch try_publish handle_ex

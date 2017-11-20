@@ -2,22 +2,24 @@ open Containers
 open Lwt
 open Nsq
 
-let ip_address = "172.17.0.2"
+let nsqd_address = "172.17.0.1"
+let lookupd_address = "172.17.0.1"
 
 let handle msg =
-  Lwt_log.debug_f "Body: %s" (Bytes.to_string msg) >>= fun () ->
+  Lwt_log.debug_f "Handled Body: %s" (Bytes.to_string msg) >>= fun () ->
   return HandlerOK
 
 let publish_error_backoff = 1.0
-let publish_interval_seconds = 0.5
+let publish_interval_seconds = 1.0
 
 let rec test_publish () =
-  let p = match Publisher.create (Host ip_address) 
+  let p = match Publisher.create (Host nsqd_address) 
     with 
     | Result.Ok p -> p 
     | Result.Error s -> failwith s in
   let rec loop () =
     let msg = Unix.gettimeofday () |> string_of_float |> Bytes.of_string in
+    Lwt_log.debug_f "Publishing: %s" (Bytes.to_string msg) >>= fun () ->
     Publisher.publish p (Topic "Test") msg >>= function
     | Result.Ok _ -> 
       Lwt_unix.sleep publish_interval_seconds >>= loop
@@ -32,7 +34,7 @@ let create_consumer chan_name handler =
   let config = Consumer.{dc with max_in_flight = 100;} in
   match Consumer.create 
           ~config
-          [(Host ip_address)]
+          [(Host nsqd_address)]
           (Topic "Test") 
           (Channel chan_name)
           handler
@@ -40,8 +42,18 @@ let create_consumer chan_name handler =
   | Result.Ok c -> c
   | Result.Error s -> failwith s
 
-let create_consumers count =
-  List.init count (fun i -> create_consumer (string_of_int i) handle)
+let create_lookupd_consumer chan_name handler =
+  let dc = Consumer.default_config () in
+  let config = Consumer.{dc with max_in_flight = 100;} in
+  match Consumer.create_using_nsqlookup
+          ~config
+          [Host lookupd_address]
+          (Topic "Test") 
+          (Channel chan_name)
+          handler
+  with
+  | Result.Ok c -> c
+  | Result.Error s -> failwith s
 
 let setup_logging level =
   Lwt_log_core.default :=
@@ -54,8 +66,9 @@ let setup_logging level =
 
 let () = 
   setup_logging Lwt_log.Debug;
-  let consumers = create_consumers 1 in
-  let running_consumers = List.map Consumer.run consumers in
+  let consumer = create_consumer "nsq_consumer" handle in
+  let l_consumer = create_lookupd_consumer "lookupd_consumer" handle in
+  let running_consumers = List.map Consumer.run [l_consumer;consumer] in
   let p1 = test_publish () in
   Lwt_main.run @@ join (p1 :: running_consumers)
 

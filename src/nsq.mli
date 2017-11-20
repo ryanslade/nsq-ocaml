@@ -43,6 +43,7 @@ module Consumer : sig
   val default_config : unit -> config
 
   val create : ?config:config -> address list -> Topic.t -> Channel.t -> (bytes -> handler_result Lwt.t) -> (t, string) Result.t
+  val create_using_nsqlookup : ?config:config -> address list -> Topic.t -> Channel.t -> (bytes -> handler_result Lwt.t) -> (t, string) Result.t
   val run : t -> unit Lwt.t
 end
 
