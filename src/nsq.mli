@@ -1,8 +1,16 @@
 open Containers
 
-type address =
-  | Host of string
-  | HostPort of string * int
+module Address : sig
+  type t =
+    | Host of string
+    | HostPort of string * int
+
+  val host : string -> t
+  val host_port : string -> int -> t
+  val to_string : t -> string
+  val compare : t -> t -> int
+  val equal : t -> t -> bool
+end
 
 module Channel : sig
   type t =
@@ -26,7 +34,7 @@ type handler_result =
 
 module Publisher : sig
   type t
-  val create : ?pool_size:int -> address -> (t, string) Result.t
+  val create : ?pool_size:int -> Address.t -> (t, string) Result.t
   val publish : t -> Topic.t -> bytes -> (unit, string) Result.t Lwt.t
   val publish_multi : t -> Topic.t -> bytes list -> (unit, string) Result.t Lwt.t
 end
@@ -42,8 +50,8 @@ module Consumer : sig
 
   val default_config : unit -> config
 
-  val create : ?config:config -> address list -> Topic.t -> Channel.t -> (bytes -> handler_result Lwt.t) -> (t, string) Result.t
-  val create_using_nsqlookup : ?config:config -> address list -> Topic.t -> Channel.t -> (bytes -> handler_result Lwt.t) -> (t, string) Result.t
-  val run : t -> unit Lwt.t
+  val create                 : ?config:config -> Address.t list -> Topic.t -> Channel.t -> (bytes -> handler_result Lwt.t) -> (t, string) Result.t
+  val create_using_nsqlookup : ?config:config -> Address.t list -> Topic.t -> Channel.t -> (bytes -> handler_result Lwt.t) -> (t, string) Result.t
+  val run                    : t -> unit Lwt.t
 end
 

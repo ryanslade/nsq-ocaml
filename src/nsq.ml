@@ -6,7 +6,7 @@ let ephemeral_suffix = "#ephemeral"
 let default_backoff_seconds = 1.0
 let max_backoff_seconds = 3600.0
 let default_nsqd_port = 4150
-let default_lookupd_http_port = 4161
+let default_lookupd_port = 4161
 let default_lookupd_poll_seconds = 60.
 let network_buffer_size = 8192
 
@@ -81,13 +81,29 @@ type raw_message = {
   body: bytes; 
 }
 
-type address =
-  | Host of string
-  | HostPort of string * int
+module Address = struct
+  type t =
+    | Host of string
+    | HostPort of string * int
 
-let string_of_address = function
-  | Host h -> h
-  | HostPort (h, p) -> Format.sprintf "%s:%d" h p
+  let host s =
+    Host s
+
+  let host_port a p =
+    HostPort (a, p)
+
+  let to_string a =
+    match a with
+    | Host a -> a
+    | HostPort (a, p) -> Format.sprintf "%s:%d" a p
+
+  let compare a b =
+    String.compare (to_string a) (to_string b)
+
+  let equal a b =
+    String.equal (to_string a) (to_string b)
+
+end
 
 type command =
   (* TODO: Identify *)
@@ -132,30 +148,23 @@ type lookup_response = {
 }
 
 let producer_addresses lr =
-  List.map (fun p -> HostPort (p.broadcast_address, p.tcp_port)) lr.producers
+  List.map (fun p -> Address.host_port p.broadcast_address p.tcp_port) lr.producers
 
 let lookup_producer_from_json_exn j =
   let open Yojson.Basic in
-  let broadcast_address = Util.member "broadcast_address" j |> Util.to_string in
-  let hostname = Util.member "hostname" j |> Util.to_string in
-  let tcp_port = Util.member "tcp_port" j |> Util.to_int in
-  let http_port = Util.member "http_port" j |> Util.to_int in
-  let version = Util.member "version" j |> Util.to_string in
   {
-    broadcast_address;
-    hostname;
-    tcp_port;
-    http_port;
-    version;
+    broadcast_address = Util.member "broadcast_address" j |> Util.to_string;
+    hostname = Util.member "hostname" j |> Util.to_string;
+    tcp_port = Util.member "tcp_port" j |> Util.to_int;
+    http_port = Util.member "http_port" j |> Util.to_int;
+    version = Util.member "version" j |> Util.to_string;
   }
 
 let lookup_response_from_json_exn j =
   let open Yojson.Basic in
-  let channels = Util.member "channels" j |> Util.to_list |> List.map Util.to_string in
-  let producers = Util.member "producers" j |> Util.to_list |> List.map lookup_producer_from_json_exn in
   {
-    channels;
-    producers;
+    channels = Util.member "channels" j |> Util.to_list |> List.map Util.to_string;
+    producers =  Util.member "producers" j |> Util.to_list |> List.map lookup_producer_from_json_exn;
   }
 
 let lookup_response_from_string s =
@@ -165,8 +174,8 @@ let lookup_response_from_string s =
 
 let query_nsqlookupd a topic =
   let host, port = match a with
-    | Host h -> h, default_lookupd_http_port
-    | HostPort (h, p) -> (h, p)
+    | Address.Host h -> h, default_lookupd_port
+    | Address.HostPort (h, p) -> (h, p)
   in
   let topic_string = Topic.to_string topic in
   let uri = 
@@ -261,8 +270,8 @@ let catch_result promise =
 
 let connect host =
   let (host, port) = match host with
-    | Host h          -> (h, default_nsqd_port)
-    | HostPort (h, p) -> (h, p)
+    | Address.Host h          -> (h, default_nsqd_port)
+    | Address.HostPort (h, p) -> (h, p)
   in
   Lwt_unix.gethostbyname host >>= fun info ->
   match Array.get_safe info.h_addr_list 0 with
@@ -417,10 +426,10 @@ module Consumer = struct
 
   let backoff_duration backoff_multiplier error_count =
     let bo = (backoff_multiplier *. (float_of_int error_count)) in
-    min bo max_backoff_seconds
+    Float.min bo max_backoff_seconds
 
   type t = {
-    addresses : address list;
+    addresses : Address.t list;
     desired_rdy : int;
     topic : Topic.t;
     channel : Channel.t;
@@ -587,19 +596,18 @@ module Consumer = struct
       let to_run = 
         List.keep_ok results
         |> List.flat_map producer_addresses
-        |> List.sort_uniq 
-        |> List.filter (fun a -> not @@ List.mem a running)
+        |> List.sort_uniq ~cmp:Address.compare
+        |> List.filter (fun a -> not @@ List.mem ~eq:Address.equal a running)
       in
       Lwt_log.debug_f "Found %d new publishers" (List.length to_run) >>= fun () ->
       List.iter 
         (fun a -> 
            async (fun () -> 
-               Lwt_log.debug_f "Starting consumer for: %s" (string_of_address a) >>= fun () ->
-               start_nsqd_consumer c a
-             )
+               Lwt_log.debug_f "Starting consumer for: %s" (Address.to_string a) >>= fun () ->
+               start_nsqd_consumer c a)
         ) 
         to_run;
-      let running = List.union running to_run in
+      let running = List.union ~eq:Address.equal running to_run in
       Lwt_unix.sleep default_lookupd_poll_seconds >>= fun () ->
       internal running
     in
@@ -639,7 +647,7 @@ module Publisher = struct
     let validate = fun c ->
       let now = Unix.time () in
       let diff = now -. !(c.last_send) in
-      return (diff < ttl_seconds)
+      return (Float.(<) diff ttl_seconds)
     in
     Lwt_pool.create size ~validate
       begin

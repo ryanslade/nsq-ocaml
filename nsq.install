@@ -1,15 +1,17 @@
 lib: [
   "_build/install/default/lib/nsq/META" {"META"}
   "_build/install/default/lib/nsq/opam" {"opam"}
-  "_build/install/default/lib/nsq/nsq.cmi"
-  "_build/install/default/lib/nsq/nsq.cmx"
-  "_build/install/default/lib/nsq/nsq.cmt"
-  "_build/install/default/lib/nsq/nsq.cmti"
-  "_build/install/default/lib/nsq/nsq.mli"
-  "_build/install/default/lib/nsq/nsq.cma"
-  "_build/install/default/lib/nsq/nsq.cmxa"
-  "_build/install/default/lib/nsq/nsq.a"
-  "_build/install/default/lib/nsq/nsq.cmxs"
+  "_build/install/default/lib/nsq/nsq.cmi" {"nsq.cmi"}
+  "_build/install/default/lib/nsq/nsq.cmx" {"nsq.cmx"}
+  "_build/install/default/lib/nsq/nsq.cmt" {"nsq.cmt"}
+  "_build/install/default/lib/nsq/nsq.cmti" {"nsq.cmti"}
+  "_build/install/default/lib/nsq/nsq.mli" {"nsq.mli"}
+  "_build/install/default/lib/nsq/nsq.ml" {"nsq.ml"}
+  "_build/install/default/lib/nsq/nsq.cma" {"nsq.cma"}
+  "_build/install/default/lib/nsq/nsq.cmxa" {"nsq.cmxa"}
+  "_build/install/default/lib/nsq/nsq.a" {"nsq.a"}
+  "_build/install/default/lib/nsq/nsq.cmxs" {"nsq.cmxs"}
+  "_build/install/default/lib/nsq/nsq.dune" {"nsq.dune"}
 ]
 doc: [
   "_build/install/default/doc/nsq/README.md"
