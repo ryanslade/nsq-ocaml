@@ -135,42 +135,26 @@ type handler_result =
   | HandlerRequeue
 
 type lookup_producer = {
-  broadcast_address: string;
+  remote_address: string;
   hostname: string;
+  broadcast_address: string;
   tcp_port: int;
   http_port: int;
   version: string;
-}
+} [@@deriving yojson]
 
 type lookup_response = {
   channels: string list;
   producers: lookup_producer list;
-}
+} [@@deriving yojson]
 
 let producer_addresses lr =
   List.map (fun p -> Address.host_port p.broadcast_address p.tcp_port) lr.producers
 
-let lookup_producer_from_json_exn j =
-  let open Yojson.Basic in
-  {
-    broadcast_address = Util.member "broadcast_address" j |> Util.to_string;
-    hostname = Util.member "hostname" j |> Util.to_string;
-    tcp_port = Util.member "tcp_port" j |> Util.to_int;
-    http_port = Util.member "http_port" j |> Util.to_int;
-    version = Util.member "version" j |> Util.to_string;
-  }
-
-let lookup_response_from_json_exn j =
-  let open Yojson.Basic in
-  {
-    channels = Util.member "channels" j |> Util.to_list |> List.map Util.to_string;
-    producers =  Util.member "producers" j |> Util.to_list |> List.map lookup_producer_from_json_exn;
-  }
-
 let lookup_response_from_string s =
   let open Result in
-  guard_str (fun () -> Yojson.Basic.from_string s) >>= fun json ->
-  guard_str (fun () -> lookup_response_from_json_exn json)
+  guard_str (fun () -> Yojson.Safe.from_string s) >>= fun json ->
+  lookup_response_of_yojson json
 
 let query_nsqlookupd a topic =
   let host, port = match a with

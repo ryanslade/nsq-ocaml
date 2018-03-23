@@ -26,6 +26,8 @@ B /home/ryan/.opam/4.06.1/lib/magic-mime
 B /home/ryan/.opam/4.06.1/lib/ocaml
 B /home/ryan/.opam/4.06.1/lib/ocaml/threads
 B /home/ryan/.opam/4.06.1/lib/ocplib-endian
+B /home/ryan/.opam/4.06.1/lib/ppx_deriving
+B /home/ryan/.opam/4.06.1/lib/ppx_deriving_yojson
 B /home/ryan/.opam/4.06.1/lib/re
 B /home/ryan/.opam/4.06.1/lib/re/emacs
 B /home/ryan/.opam/4.06.1/lib/re/posix
@@ -37,6 +39,7 @@ B /home/ryan/.opam/4.06.1/lib/uchar
 B /home/ryan/.opam/4.06.1/lib/uri
 B /home/ryan/.opam/4.06.1/lib/uri/services
 B /home/ryan/.opam/4.06.1/lib/yojson
+FLG -ppx '/home/ryan/Dropbox/Coding/ocaml/nsq-ocaml/_build/default/.ppx/ppx_deriving_yojson/ppx.exe --as-ppx --cookie '\''library-name="nsq"'\'''
 FLG -w -40
 S .
 S /home/ryan/.opam/4.06.1/lib/astring
@@ -66,6 +69,8 @@ S /home/ryan/.opam/4.06.1/lib/magic-mime
 S /home/ryan/.opam/4.06.1/lib/ocaml
 S /home/ryan/.opam/4.06.1/lib/ocaml/threads
 S /home/ryan/.opam/4.06.1/lib/ocplib-endian
+S /home/ryan/.opam/4.06.1/lib/ppx_deriving
+S /home/ryan/.opam/4.06.1/lib/ppx_deriving_yojson
 S /home/ryan/.opam/4.06.1/lib/re
 S /home/ryan/.opam/4.06.1/lib/re/emacs
 S /home/ryan/.opam/4.06.1/lib/re/posix

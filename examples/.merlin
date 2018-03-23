@@ -27,6 +27,8 @@ B /home/ryan/.opam/4.06.1/lib/magic-mime
 B /home/ryan/.opam/4.06.1/lib/ocaml
 B /home/ryan/.opam/4.06.1/lib/ocaml/threads
 B /home/ryan/.opam/4.06.1/lib/ocplib-endian
+B /home/ryan/.opam/4.06.1/lib/ppx_deriving
+B /home/ryan/.opam/4.06.1/lib/ppx_deriving_yojson
 B /home/ryan/.opam/4.06.1/lib/re
 B /home/ryan/.opam/4.06.1/lib/re/emacs
 B /home/ryan/.opam/4.06.1/lib/re/posix
@@ -68,6 +70,8 @@ S /home/ryan/.opam/4.06.1/lib/magic-mime
 S /home/ryan/.opam/4.06.1/lib/ocaml
 S /home/ryan/.opam/4.06.1/lib/ocaml/threads
 S /home/ryan/.opam/4.06.1/lib/ocplib-endian
+S /home/ryan/.opam/4.06.1/lib/ppx_deriving
+S /home/ryan/.opam/4.06.1/lib/ppx_deriving_yojson
 S /home/ryan/.opam/4.06.1/lib/re
 S /home/ryan/.opam/4.06.1/lib/re/emacs
 S /home/ryan/.opam/4.06.1/lib/re/posix
