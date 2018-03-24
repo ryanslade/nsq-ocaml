@@ -153,8 +153,8 @@ let producer_addresses lr =
 
 let lookup_response_from_string s =
   let open Result in
-  guard_str (fun () -> Yojson.Safe.from_string s) >>= fun json ->
-  lookup_response_of_yojson json
+  guard_str (fun () -> Yojson.Safe.from_string s) >>=
+  lookup_response_of_yojson
 
 let query_nsqlookupd a topic =
   let host, port = match a with
@@ -444,21 +444,11 @@ module Consumer = struct
   let create_using_nsqlookup ?(config=default_config_value) addresses topic channel handler =
     create_internal ~config ~use_lookupd:true addresses topic channel handler
 
-  let wait_all promises =
-    let rec internal completed pending =
-      match pending with
-      | [] -> return completed
-      | _ ->
-        Lwt.nchoose_split pending >>= fun (complete, pending) ->
-        internal (completed @ complete) pending
-    in
-    internal [] promises
-
   let do_after duration f =
     Lwt_log.debug_f "Sleeping for %f seconds" duration >>= fun () ->
     Lwt_unix.sleep duration >>= fun () ->
-    Lwt_log.debug "Sleeping done" >>= fun () ->
-    f (); (* Why do we need this semicolon?  *)
+    Lwt_log.debug_f "Slept for %f seconds" duration >>= fun () ->
+    f ()
 
   type loop_message =
     | RawFrame of raw_frame
@@ -575,23 +565,25 @@ module Consumer = struct
   let start_polling_lookupd c lookup_addresses =
     let rec internal running =
       Lwt_log.debug_f "Querying %d lookupd hosts" (List.length lookup_addresses) >>= fun () ->
-      List.map (fun a -> query_nsqlookupd a c.topic) lookup_addresses
-      |> wait_all >>= fun results ->
-      let to_run = 
+      (**
+         // TODO: Log errors querying
+      *)
+      Lwt_list.map_p (fun a -> query_nsqlookupd a c.topic) lookup_addresses >>= fun results ->
+      let new_publishers =
         List.keep_ok results
         |> List.flat_map producer_addresses
         |> List.sort_uniq ~cmp:Address.compare
         |> List.filter (fun a -> not @@ List.mem ~eq:Address.equal a running)
       in
-      Lwt_log.debug_f "Found %d new publishers" (List.length to_run) >>= fun () ->
+      Lwt_log.debug_f "Found %d new publishers" (List.length new_publishers) >>= fun () ->
       List.iter 
         (fun a -> 
            async (fun () -> 
                Lwt_log.debug_f "Starting consumer for: %s" (Address.to_string a) >>= fun () ->
                start_nsqd_consumer c a)
         ) 
-        to_run;
-      let running = List.union ~eq:Address.equal running to_run in
+        new_publishers;
+      let running = List.union ~eq:Address.equal running new_publishers in
       Lwt_unix.sleep default_lookupd_poll_seconds >>= fun () ->
       internal running
     in
