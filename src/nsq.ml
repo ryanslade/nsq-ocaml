@@ -156,6 +156,13 @@ let lookup_response_from_string s =
   guard_str (fun () -> Yojson.Safe.from_string s) >>=
   lookup_response_of_yojson
 
+let log_and_return prefix r =
+  match r with
+  | Result.Ok r as ok -> return ok
+  | Result.Error s as error ->
+    Lwt_log.debug_f "%s: %s" prefix s >>= fun () ->
+    return error
+
 let query_nsqlookupd a topic =
   let host, port = match a with
     | Address.Host h -> h, default_lookupd_port
@@ -179,7 +186,7 @@ let query_nsqlookupd a topic =
         match Response.status resp with
         | `OK ->
           Cohttp_lwt.Body.to_string body >>= fun body ->
-          return @@ lookup_response_from_string body
+          log_and_return "Error parsing lookup response" @@ lookup_response_from_string body
         | status ->
           return_error (Format.sprintf "Expected %s, got %s" (Code.string_of_status `OK) (Code.string_of_status status))
     end
@@ -565,9 +572,6 @@ module Consumer = struct
   let start_polling_lookupd c lookup_addresses =
     let rec internal running =
       Lwt_log.debug_f "Querying %d lookupd hosts" (List.length lookup_addresses) >>= fun () ->
-      (**
-         // TODO: Log errors querying
-      *)
       Lwt_list.map_p (fun a -> query_nsqlookupd a c.topic) lookup_addresses >>= fun results ->
       let new_publishers =
         List.keep_ok results
