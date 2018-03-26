@@ -163,7 +163,7 @@ let log_and_return prefix r =
     Lwt_log.debug_f "%s: %s" prefix s >>= fun () ->
     return error
 
-let query_nsqlookupd a topic =
+let query_nsqlookupd ~topic a =
   let host, port = match a with
     | Address.Host h -> h, default_lookupd_port
     | Address.HostPort (h, p) -> (h, p)
@@ -419,6 +419,10 @@ module Consumer = struct
     let bo = (backoff_multiplier *. (float_of_int error_count)) in
     Float.min bo max_backoff_seconds
 
+  type mode =
+    | ModeNsqd
+    | ModeLookupd
+
   type t = {
     addresses : Address.t list;
     desired_rdy : int;
@@ -426,10 +430,10 @@ module Consumer = struct
     channel : Channel.t;
     handler : (bytes -> handler_result Lwt.t);
     config : config;
-    use_lookupd : bool;
+    mode : mode;
   }
 
-  let create_internal ?(config=default_config_value) ?(use_lookupd=false) addresses topic channel handler =
+  let create ?(mode=ModeNsqd) ?(config=default_config_value) addresses topic channel handler =
     let num_addresses = List.length addresses in
     match validate_config config with
     | Result.Error s -> Result.Error (Format.sprintf "Invalid config: %s" s)
@@ -442,14 +446,8 @@ module Consumer = struct
         channel; 
         handler;
         config;
-        use_lookupd;
+        mode;
       }
-
-  let create ?(config=default_config_value) addresses topic channel handler =
-    create_internal ~config addresses topic channel handler
-
-  let create_using_nsqlookup ?(config=default_config_value) addresses topic channel handler =
-    create_internal ~config ~use_lookupd:true addresses topic channel handler
 
   let do_after duration f =
     Lwt_log.debug_f "Sleeping for %f seconds" duration >>= fun () ->
@@ -562,7 +560,7 @@ module Consumer = struct
       main_loop c address mbox
 
   let async_exception_hook e =
-    ignore_result @@ Lwt_log.error_f "Async exception: %s" (Printexc.to_string e)
+    async (fun () -> Lwt_log.error_f "Async exception: %s" (Printexc.to_string e))
 
   let start_nsqd_consumer c address =
     let mbox = Lwt_mvar.create_empty () in
@@ -572,7 +570,7 @@ module Consumer = struct
   let start_polling_lookupd c lookup_addresses =
     let rec internal running =
       Lwt_log.debug_f "Querying %d lookupd hosts" (List.length lookup_addresses) >>= fun () ->
-      Lwt_list.map_p (fun a -> query_nsqlookupd a c.topic) lookup_addresses >>= fun results ->
+      Lwt_list.map_p (query_nsqlookupd ~topic:c.topic) lookup_addresses >>= fun results ->
       let new_publishers =
         List.keep_ok results
         |> List.flat_map producer_addresses
@@ -595,11 +593,11 @@ module Consumer = struct
 
   let run c =
     Lwt.async_exception_hook := async_exception_hook;
-    if c.use_lookupd
-    then
+    match c.mode with
+    | ModeLookupd ->
       Lwt_log.debug "Starting lookupd poll" >>= fun () ->
       start_polling_lookupd c c.addresses
-    else
+    | ModeNsqd ->
       let consumers = List.map (fun a -> start_nsqd_consumer c a) c.addresses in
       Lwt.join consumers
 

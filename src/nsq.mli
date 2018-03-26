@@ -50,8 +50,11 @@ module Consumer : sig
 
   val default_config : unit -> config
 
-  val create                 : ?config:config -> Address.t list -> Topic.t -> Channel.t -> (bytes -> handler_result Lwt.t) -> (t, string) Result.t
-  val create_using_nsqlookup : ?config:config -> Address.t list -> Topic.t -> Channel.t -> (bytes -> handler_result Lwt.t) -> (t, string) Result.t
-  val run                    : t -> unit Lwt.t
+  type mode =
+    | ModeNsqd
+    | ModeLookupd
+
+  val create : ?mode:mode -> ?config:config -> Address.t list -> Topic.t -> Channel.t -> (bytes -> handler_result Lwt.t) -> (t, string) Result.t
+  val run : t -> unit Lwt.t
 end
 
