@@ -4,6 +4,6 @@
  ((names (example))
   (libraries (nsq))))
 
-(alias
-  ((name DEFAULT)
-   (deps (example.exe))))
+(install
+ ((section bin)
+  (files ((example.exe as example)))))
