@@ -1,7 +1,7 @@
 JBUILDER ?= jbuilder
 
 example: 
-	$(JBUILDER) build --dev @install
+	$(JBUILDER) build @install
 
 clean:
 	rm -rf _build

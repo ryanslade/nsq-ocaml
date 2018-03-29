@@ -32,7 +32,7 @@ type handler_result =
   | HandlerOK
   | HandlerRequeue
 
-module Publisher : sig
+module Producer : sig
   type t
   val create : ?pool_size:int -> Address.t -> (t, string) Result.t
   val publish : t -> Topic.t -> bytes -> (unit, string) Result.t Lwt.t

@@ -1,5 +1,4 @@
 open Containers
-open Printf
 open Lwt
 
 let ephemeral_suffix = "#ephemeral"
@@ -158,7 +157,7 @@ let lookup_response_from_string s =
 
 let log_and_return prefix r =
   match r with
-  | Result.Ok r as ok -> return ok
+  | Result.Ok _ as ok -> return ok
   | Result.Error s as error ->
     Lwt_log.debug_f "%s: %s" prefix s >>= fun () ->
     return error
@@ -193,7 +192,7 @@ let query_nsqlookupd ~topic a =
     begin
       fun e ->
         let s = Printexc.to_string e in
-        Lwt_log.error_f "Querying lookupd: %s" s >>= fun () ->
+        Lwt_log.error_f "Querying lookupd `%s`: %s" (Address.to_string a) s >>= fun () ->
         return_error s
     end
 
@@ -555,7 +554,7 @@ module Consumer = struct
       catch handle_ok handle_ex >>= fun () ->
       main_loop c address mbox
     | Result.Error e ->
-      Lwt_log.error_f "Error connecting: %s" (Printexc.to_string e) >>= fun () ->
+      Lwt_log.error_f "Connecting to consumer '%s': %s" (Address.to_string address) (Printexc.to_string e) >>= fun () ->
       Lwt_unix.sleep default_backoff_seconds >>= fun () ->
       main_loop c address mbox
 
@@ -571,21 +570,21 @@ module Consumer = struct
     let rec internal running =
       Lwt_log.debug_f "Querying %d lookupd hosts" (List.length lookup_addresses) >>= fun () ->
       Lwt_list.map_p (query_nsqlookupd ~topic:c.topic) lookup_addresses >>= fun results ->
-      let new_publishers =
+      let new_producers =
         List.keep_ok results
         |> List.flat_map producer_addresses
         |> List.sort_uniq ~cmp:Address.compare
         |> List.filter (fun a -> not @@ List.mem ~eq:Address.equal a running)
       in
-      Lwt_log.debug_f "Found %d new publishers" (List.length new_publishers) >>= fun () ->
+      Lwt_log.debug_f "Found %d new producers" (List.length new_producers) >>= fun () ->
       List.iter 
         (fun a -> 
            async (fun () -> 
                Lwt_log.debug_f "Starting consumer for: %s" (Address.to_string a) >>= fun () ->
                start_nsqd_consumer c a)
         ) 
-        new_publishers;
-      let running = List.union ~eq:Address.equal running new_publishers in
+        new_producers;
+      let running = List.union ~eq:Address.equal running new_producers in
       Lwt_unix.sleep default_lookupd_poll_seconds >>= fun () ->
       internal running
     in
@@ -603,14 +602,15 @@ module Consumer = struct
 
 end
 
-module Publisher = struct
+module Producer = struct
   type connection = {
     conn : (Lwt_io.input Lwt_io.channel * Lwt_io.output Lwt_io.channel);
     last_send : float ref
   }
 
   type t = { 
-    pool : connection Lwt_pool.t
+    address : Address.t;
+    pool : connection Lwt_pool.t;
   }
 
   let default_pool_size = 5
@@ -639,9 +639,9 @@ module Publisher = struct
   let create ?(pool_size=default_pool_size) address = 
     if pool_size <= 0
     then Result.Error "Pool size must be >= 1"
-    else Result.Ok { pool = create_pool address pool_size }
+    else Result.Ok { address; pool = create_pool address pool_size }
 
-  let publish_cmd t topic cmd =
+  let publish_cmd t cmd =
     let with_conn c =
       let rec read_until_ok () =
         read_raw_frame c.conn >>= fun frame ->
@@ -660,17 +660,17 @@ module Publisher = struct
     in
     let try_publish () = Lwt_pool.use t.pool with_conn in
     let handle_ex e =
-      let message = Format.sprintf "Error publishing: %s" (Printexc.to_string e) in
+      let message = Format.sprintf "Publishing to `%s`: %s" (Address.to_string t.address) (Printexc.to_string e) in
       return (Result.Error message)
     in
     catch try_publish handle_ex
 
   let publish t topic message =
     let cmd = (PUB (topic, message)) in
-    publish_cmd t topic cmd
+    publish_cmd t cmd
 
   let publish_multi t topic messages =
     let cmd = (MPUB (topic, messages)) in
-    publish_cmd t topic cmd
+    publish_cmd t cmd
 
 end

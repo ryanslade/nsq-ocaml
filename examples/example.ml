@@ -15,11 +15,11 @@ let publish_error_backoff = 1.0
 let publish_interval_seconds = 1.0
 
 let rec test_publish () =
-  let p = Result.get_exn @@ Publisher.create (Host nsqd_address) in
+  let p = Result.get_exn @@ Producer.create (Host nsqd_address) in
   let rec loop () =
     let msg = Unix.gettimeofday () |> string_of_float |> Bytes.of_string in
     Lwt_log.debug_f "Publishing: %s" (Bytes.to_string msg) >>= fun () ->
-    Publisher.publish p (Topic "Test") msg >>= function
+    Producer.publish p (Topic "Test") msg >>= function
     | Result.Ok _ -> 
       Lwt_unix.sleep publish_interval_seconds >>= loop
     | Result.Error e -> 
