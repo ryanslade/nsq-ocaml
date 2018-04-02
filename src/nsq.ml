@@ -258,6 +258,9 @@ let catch_result promise =
     (fun x -> return_ok x)
     (fun e -> return_error e)
 
+let catch_result1 f x =
+  catch_result (fun () -> f x)
+
 let connect host =
   let (host, port) = match host with
     | Address.Host h          -> (h, default_nsqd_port)
@@ -335,7 +338,7 @@ let requeue_delay attempts =
   Milliseconds.of_int64 Int64.(d * attempts)
 
 let handle_message handler msg max_attempts =
-  catch_result (fun () -> handler msg.body) >>=
+  catch_result1 handler msg.body >>= 
   begin
     function
     | Result.Ok r -> return r
@@ -462,7 +465,7 @@ module Consumer = struct
 
   let rec read_loop conn mbox =
     let put_async m = Lwt.async @@ fun () -> Lwt_mvar.put mbox m in
-    catch_result @@ (fun () -> read_raw_frame conn) >>= function
+    catch_result1 read_raw_frame conn >>= function
     | Result.Ok raw ->
       put_async @@ RawFrame raw;
       read_loop conn mbox
@@ -472,11 +475,11 @@ module Consumer = struct
 
   let open_breaker c conn mbox bs =
     (* Send RDY 0 and send retry trial command after a delay  *)
-    ignore_result @@ Lwt_log.debug "Breaker open, sending RDY 0";
-    ignore_result @@ send (RDY 0) conn;
+    async (fun () -> Lwt_log.debug "Breaker open, sending RDY 0");
+    async (fun () -> send (RDY 0) conn);
     let bs = { error_count = bs.error_count + 1; position = Open } in
     let duration = backoff_duration c.config.backoff_multiplier bs.error_count in
-    ignore_result @@ do_after duration (fun () -> Lwt_mvar.put mbox TrialBreaker);
+    async (fun () -> do_after duration (fun () -> Lwt_mvar.put mbox TrialBreaker));
     bs
 
   let update_breaker_state c conn open_breaker cmd bs =
@@ -495,7 +498,7 @@ module Consumer = struct
     | false, Open -> bs
     | false, HalfOpen ->
       (* Passed test  *)
-      ignore_result @@ send (RDY c.desired_rdy) conn;
+      async (fun () -> send (RDY c.desired_rdy) conn);
       { position = Closed; error_count = 0; }
 
   let consume c conn mbox =
@@ -526,7 +529,7 @@ module Consumer = struct
       | TrialBreaker ->
         Lwt_log.debug_f "Breaker trial, sending RDY 1 (Error count: %i)" bs.error_count >>= fun () ->
         let bs = { bs with position = HalfOpen } in
-        ignore_result @@ send (RDY 1) conn;
+        send (RDY 1) conn >>=  fun () ->
         mbox_loop bs
       | ConnectionError e ->
         fail e 
@@ -544,14 +547,13 @@ module Consumer = struct
   let rec main_loop c address mbox =
     catch_result (fun () -> connect address) >>= function
     | Result.Ok conn ->
-      let handle_ok () = consume c conn mbox in
       let handle_ex e = 
         Lwt_log.error_f "Reader failed: %s" (Printexc.to_string e) >>= fun () ->
         Lwt_io.close (fst conn) >>= fun () ->
         Lwt_io.close (snd conn) >>= fun () ->
         Lwt_unix.sleep default_backoff_seconds
       in
-      catch handle_ok handle_ex >>= fun () ->
+      catch (fun () -> consume c conn mbox) handle_ex >>= fun () ->
       main_loop c address mbox
     | Result.Error e ->
       Lwt_log.error_f "Connecting to consumer '%s': %s" (Address.to_string address) (Printexc.to_string e) >>= fun () ->

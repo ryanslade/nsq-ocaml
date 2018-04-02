@@ -24,12 +24,14 @@ B /home/ryan/.opam/4.06.1/lib/logs
 B /home/ryan/.opam/4.06.1/lib/lwt
 B /home/ryan/.opam/4.06.1/lib/magic-mime
 B /home/ryan/.opam/4.06.1/lib/ocaml
+B /home/ryan/.opam/4.06.1/lib/ocaml-migrate-parsetree
+B /home/ryan/.opam/4.06.1/lib/ocaml/compiler-libs
 B /home/ryan/.opam/4.06.1/lib/ocaml/threads
 B /home/ryan/.opam/4.06.1/lib/ocplib-endian
 B /home/ryan/.opam/4.06.1/lib/ppx_deriving
 B /home/ryan/.opam/4.06.1/lib/ppx_deriving_yojson
+B /home/ryan/.opam/4.06.1/lib/ppx_tools_versioned
 B /home/ryan/.opam/4.06.1/lib/re
-B /home/ryan/.opam/4.06.1/lib/re/emacs
 B /home/ryan/.opam/4.06.1/lib/re/posix
 B /home/ryan/.opam/4.06.1/lib/result
 B /home/ryan/.opam/4.06.1/lib/sexplib
@@ -39,7 +41,7 @@ B /home/ryan/.opam/4.06.1/lib/uchar
 B /home/ryan/.opam/4.06.1/lib/uri
 B /home/ryan/.opam/4.06.1/lib/uri/services
 B /home/ryan/.opam/4.06.1/lib/yojson
-FLG -ppx '/home/ryan/Dropbox/Coding/ocaml/nsq-ocaml/_build/default/.ppx/ppx_deriving_yojson/ppx.exe --as-ppx --cookie '\''library-name="nsq"'\'''
+FLG -ppx '/home/ryan/Dropbox/Coding/ocaml/nsq-ocaml/_build/default/.ppx/ppx_deriving_yojson+lwt.ppx/ppx.exe --as-ppx --cookie '\''library-name="nsq"'\'''
 FLG -w -40
 S .
 S /home/ryan/.opam/4.06.1/lib/astring
@@ -67,12 +69,14 @@ S /home/ryan/.opam/4.06.1/lib/logs
 S /home/ryan/.opam/4.06.1/lib/lwt
 S /home/ryan/.opam/4.06.1/lib/magic-mime
 S /home/ryan/.opam/4.06.1/lib/ocaml
+S /home/ryan/.opam/4.06.1/lib/ocaml-migrate-parsetree
+S /home/ryan/.opam/4.06.1/lib/ocaml/compiler-libs
 S /home/ryan/.opam/4.06.1/lib/ocaml/threads
 S /home/ryan/.opam/4.06.1/lib/ocplib-endian
 S /home/ryan/.opam/4.06.1/lib/ppx_deriving
 S /home/ryan/.opam/4.06.1/lib/ppx_deriving_yojson
+S /home/ryan/.opam/4.06.1/lib/ppx_tools_versioned
 S /home/ryan/.opam/4.06.1/lib/re
-S /home/ryan/.opam/4.06.1/lib/re/emacs
 S /home/ryan/.opam/4.06.1/lib/re/posix
 S /home/ryan/.opam/4.06.1/lib/result
 S /home/ryan/.opam/4.06.1/lib/sexplib
