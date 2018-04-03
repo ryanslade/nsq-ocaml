@@ -159,7 +159,7 @@ let log_and_return prefix r =
   match r with
   | Result.Ok _ as ok -> return ok
   | Result.Error s as error ->
-    Lwt_log.debug_f "%s: %s" prefix s >>= fun () ->
+    Lwt_log.ign_debug_f "%s: %s" prefix s;
     return error
 
 let query_nsqlookupd ~topic a =
@@ -192,7 +192,7 @@ let query_nsqlookupd ~topic a =
     begin
       fun e ->
         let s = Printexc.to_string e in
-        Lwt_log.error_f "Querying lookupd `%s`: %s" (Address.to_string a) s >>= fun () ->
+        Lwt_log.ign_error_f "Querying lookupd `%s`: %s" (Address.to_string a) s;
         return_error s
     end
 
@@ -343,7 +343,7 @@ let handle_message handler msg max_attempts =
     function
     | Result.Ok r -> return r
     | Result.Error e ->
-      Lwt_log.error_f "Handler error: %s" (Printexc.to_string e) >>= fun () ->
+      Lwt_log.ign_error_f "Handler error: %s" (Printexc.to_string e);
       return HandlerRequeue
   end
   >>= function 
@@ -352,14 +352,14 @@ let handle_message handler msg max_attempts =
     let attempts = Unsigned.UInt16.to_int msg.attempts in
     if attempts >= max_attempts
     then 
-      Lwt_log.warning_f "Discarding message as reached max attempts, %d" attempts >>= fun () ->
-      return (FIN msg.id)
+      (Lwt_log.ign_warning_f "Discarding message as reached max attempts, %d" attempts;
+       return (FIN msg.id))
     else
       let delay = requeue_delay attempts in
       return (REQ (msg.id, delay))
 
 let handle_frame frame handler max_attempts =
-  let warn_return_none name msg = Lwt_log.warning_f "%s: %s" name msg >>= fun () -> return_none in
+  let warn_return_none name msg = Lwt_log.ign_warning_f "%s: %s" name msg; return_none in
   match frame with
   | ResponseOk -> return_none
   | Heartbeat -> Lwt_log.debug "Received heartbeat" >>= fun () -> return_some NOP
@@ -453,7 +453,7 @@ module Consumer = struct
       }
 
   let do_after duration f =
-    Lwt_log.debug_f "Sleeping for %f seconds" duration >>= fun () ->
+    Lwt_log.ign_debug_f "Sleeping for %f seconds" duration;
     Lwt_unix.sleep duration >>= f
 
   type loop_message =
@@ -474,7 +474,7 @@ module Consumer = struct
 
   let open_breaker c conn mbox bs =
     (* Send RDY 0 and send retry trial command after a delay  *)
-    Lwt_log.debug "Breaker open, sending RDY 0" >>= fun () ->
+    Lwt_log.ign_debug "Breaker open, sending RDY 0";
     send (RDY 0) conn >>= fun () ->
     let bs = { error_count = bs.error_count + 1; position = Open } in
     let duration = backoff_duration c.config.backoff_multiplier bs.error_count in
@@ -500,7 +500,7 @@ module Consumer = struct
       | false, Open -> return bs
       | false, HalfOpen ->
         (* Passed test  *)
-        Lwt_log.debug_f "Trial passed, sending RDY %d" c.desired_rdy >>= fun () ->
+        Lwt_log.ign_debug_f "Trial passed, sending RDY %d" c.desired_rdy;
         send (RDY c.desired_rdy) conn >>= fun () ->
         return { position = Closed; error_count = 0; }
 
@@ -523,14 +523,14 @@ module Consumer = struct
             mbox_loop bs
 
           | Result.Error s -> 
-            Lwt_log.error_f "Error parsing response: %s" s >>= fun () ->
+            Lwt_log.ign_error_f "Error parsing response: %s" s;
             mbox_loop bs
         end
       | Command cmd ->
         send cmd conn >>= fun () ->
         update_breaker_state cmd bs >>= mbox_loop
       | TrialBreaker ->
-        Lwt_log.debug_f "Breaker trial, sending RDY 1 (Error count: %i)" bs.error_count >>= fun () ->
+        Lwt_log.ign_debug_f "Breaker trial, sending RDY 1 (Error count: %i)" bs.error_count;
         let bs = { bs with position = HalfOpen } in
         send (RDY 1) conn >>=  fun () ->
         mbox_loop bs
@@ -540,7 +540,7 @@ module Consumer = struct
     send Magic conn >>= fun () ->
     subscribe c.topic c.channel conn >>= fun () ->
     (* Start cautiously by sending RDY 1 *)
-    Lwt_log.debug "Sending initial RDY 1" >>= fun () ->
+    Lwt_log.ign_debug "Sending initial RDY 1";
     send (RDY 1) conn >>= fun () ->
     (* Start background reader *)
     Lwt.async (fun () -> read_loop conn mbox);
@@ -551,7 +551,7 @@ module Consumer = struct
     catch_result (fun () -> connect address) >>= function
     | Result.Ok conn ->
       let handle_ex e = 
-        Lwt_log.error_f "Reader failed: %s" (Printexc.to_string e) >>= fun () ->
+        Lwt_log.ign_error_f "Reader failed: %s" (Printexc.to_string e);
         Lwt_io.close (fst conn) >>= fun () ->
         Lwt_io.close (snd conn) >>= fun () ->
         Lwt_unix.sleep default_backoff_seconds
@@ -559,12 +559,12 @@ module Consumer = struct
       catch (fun () -> consume c conn mbox) handle_ex >>= fun () ->
       main_loop c address mbox
     | Result.Error e ->
-      Lwt_log.error_f "Connecting to consumer '%s': %s" (Address.to_string address) (Printexc.to_string e) >>= fun () ->
+      Lwt_log.ign_error_f "Connecting to consumer '%s': %s" (Address.to_string address) (Printexc.to_string e);
       Lwt_unix.sleep default_backoff_seconds >>= fun () ->
       main_loop c address mbox
 
   let async_exception_hook e =
-    async (fun () -> Lwt_log.error_f "Async exception: %s" (Printexc.to_string e))
+    Lwt_log.ign_error_f "Async exception: %s" (Printexc.to_string e)
 
   let start_nsqd_consumer c address =
     let mbox = Lwt_mvar.create_empty () in
@@ -573,7 +573,7 @@ module Consumer = struct
   (* Return only succesful results, but log the errors found *)
   let start_polling_lookupd c lookup_addresses =
     let rec internal running =
-      Lwt_log.debug_f "Querying %d lookupd hosts" (List.length lookup_addresses) >>= fun () ->
+      Lwt_log.ign_debug_f "Querying %d lookupd hosts" (List.length lookup_addresses);
       Lwt_list.map_p (query_nsqlookupd ~topic:c.topic) lookup_addresses >>= fun results ->
       let new_producers =
         List.keep_ok results
@@ -585,7 +585,7 @@ module Consumer = struct
       List.iter 
         (fun a -> 
            async (fun () -> 
-               Lwt_log.debug_f "Starting consumer for: %s" (Address.to_string a) >>= fun () ->
+               Lwt_log.ign_debug_f "Starting consumer for: %s" (Address.to_string a);
                start_nsqd_consumer c a)
         ) 
         new_producers;
@@ -599,7 +599,7 @@ module Consumer = struct
     Lwt.async_exception_hook := async_exception_hook;
     match c.mode with
     | ModeLookupd ->
-      Lwt_log.debug "Starting lookupd poll" >>= fun () ->
+      Lwt_log.ign_debug "Starting lookupd poll";
       start_polling_lookupd c c.addresses
     | ModeNsqd ->
       let consumers = List.map (fun a -> start_nsqd_consumer c a) c.addresses in
