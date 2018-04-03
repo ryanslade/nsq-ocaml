@@ -454,9 +454,7 @@ module Consumer = struct
 
   let do_after duration f =
     Lwt_log.debug_f "Sleeping for %f seconds" duration >>= fun () ->
-    Lwt_unix.sleep duration >>= fun () ->
-    Lwt_log.debug_f "Slept for %f seconds" duration >>= fun () ->
-    f ()
+    Lwt_unix.sleep duration >>= f
 
   type loop_message =
     | RawFrame of raw_frame
@@ -476,16 +474,16 @@ module Consumer = struct
 
   let open_breaker c conn mbox bs =
     (* Send RDY 0 and send retry trial command after a delay  *)
-    async (fun () -> Lwt_log.debug "Breaker open, sending RDY 0");
-    async (fun () -> send (RDY 0) conn);
+    Lwt_log.debug "Breaker open, sending RDY 0" >>= fun () ->
+    send (RDY 0) conn >>= fun () ->
     let bs = { error_count = bs.error_count + 1; position = Open } in
     let duration = backoff_duration c.config.backoff_multiplier bs.error_count in
     async (fun () -> do_after duration (fun () -> Lwt_mvar.put mbox TrialBreaker));
-    bs
+    return bs
 
   let update_breaker_state c conn open_breaker cmd bs =
     match cmd with
-    | NOP -> bs (* Receiving a NOP should not alter our state  *)
+    | NOP -> return bs (* Receiving a NOP should not alter our state  *)
     | _ ->
       let is_error = match cmd with
         | REQ _ -> true
@@ -494,19 +492,17 @@ module Consumer = struct
       match is_error, bs.position with
       | true, Closed ->
         open_breaker bs
-      | true, Open -> bs
+      | true, Open -> return bs
       | true, HalfOpen ->
         (* Failed test *)
         open_breaker bs
-      | false, Closed -> bs
-      | false, Open -> bs
+      | false, Closed -> return bs
+      | false, Open -> return bs
       | false, HalfOpen ->
         (* Passed test  *)
-        async (fun () ->
-            Lwt_log.debug_f "Trial passed" >>= fun() ->
-            send (RDY c.desired_rdy) conn
-          );
-        { position = Closed; error_count = 0; }
+        Lwt_log.debug_f "Trial passed, sending RDY %d" c.desired_rdy >>= fun () ->
+        send (RDY c.desired_rdy) conn >>= fun () ->
+        return { position = Closed; error_count = 0; }
 
   let consume c conn mbox =
     let open_breaker = open_breaker c conn mbox in
@@ -532,7 +528,7 @@ module Consumer = struct
         end
       | Command cmd ->
         send cmd conn >>= fun () ->
-        mbox_loop @@ update_breaker_state cmd bs
+        update_breaker_state cmd bs >>= mbox_loop
       | TrialBreaker ->
         Lwt_log.debug_f "Breaker trial, sending RDY 1 (Error count: %i)" bs.error_count >>= fun () ->
         let bs = { bs with position = HalfOpen } in
