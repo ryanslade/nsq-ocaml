@@ -352,6 +352,7 @@ let handle_message handler msg max_attempts =
     let attempts = Unsigned.UInt16.to_int msg.attempts in
     if attempts >= max_attempts
     then 
+      Lwt_log.warning_f "Discarding message as reached max attempts, %d" attempts >>= fun () ->
       return (FIN msg.id)
     else
       let delay = requeue_delay attempts in
@@ -483,23 +484,29 @@ module Consumer = struct
     bs
 
   let update_breaker_state c conn open_breaker cmd bs =
-    let is_error = match cmd with
-      | REQ _ -> true
-      | _ -> false 
-    in
-    match is_error, bs.position with
-    | true, Closed -> 
-      open_breaker bs
-    | true, Open -> bs
-    | true, HalfOpen ->
-      (* Failed test *)
-      open_breaker bs
-    | false, Closed -> bs
-    | false, Open -> bs
-    | false, HalfOpen ->
-      (* Passed test  *)
-      async (fun () -> send (RDY c.desired_rdy) conn);
-      { position = Closed; error_count = 0; }
+    match cmd with
+    | NOP -> bs (* Receiving a NOP should not alter our state  *)
+    | _ ->
+      let is_error = match cmd with
+        | REQ _ -> true
+        | _ -> false
+      in
+      match is_error, bs.position with
+      | true, Closed ->
+        open_breaker bs
+      | true, Open -> bs
+      | true, HalfOpen ->
+        (* Failed test *)
+        open_breaker bs
+      | false, Closed -> bs
+      | false, Open -> bs
+      | false, HalfOpen ->
+        (* Passed test  *)
+        async (fun () ->
+            Lwt_log.debug_f "Trial passed" >>= fun() ->
+            send (RDY c.desired_rdy) conn
+          );
+        { position = Closed; error_count = 0; }
 
   let consume c conn mbox =
     let open_breaker = open_breaker c conn mbox in
