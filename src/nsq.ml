@@ -286,8 +286,8 @@ let read_raw_frame (ic, _) =
   Lwt_io.BE.read_int32 ic >>= fun size ->
   let size = Int32.to_int size in
   let bytes = Bytes.create size in
-  Lwt_io.read_into_exactly ic bytes 0 size >>= fun () ->
-  return @@ frame_from_bytes bytes
+  Lwt_io.read_into_exactly ic bytes 0 size >|= fun () ->
+  frame_from_bytes bytes
 
 let parse_response_body body =
   let body = Bytes.to_string body in
@@ -338,25 +338,25 @@ let requeue_delay attempts =
   Milliseconds.of_int64 Int64.(d * attempts)
 
 let handle_message handler msg max_attempts =
-  catch_result1 handler msg.body >>= 
+  catch_result1 handler msg.body >|=
   begin
     function
-    | Result.Ok r -> return r
+    | Result.Ok r -> r
     | Result.Error e ->
       Lwt_log.ign_error_f "Handler error: %s" (Printexc.to_string e);
-      return HandlerRequeue
+      HandlerRequeue
   end
-  >>= function 
-  | HandlerOK -> return (FIN msg.id)
+  >|= function
+  | HandlerOK -> (FIN msg.id)
   | HandlerRequeue -> 
     let attempts = Unsigned.UInt16.to_int msg.attempts in
     if attempts >= max_attempts
     then 
       (Lwt_log.ign_warning_f "Discarding message as reached max attempts, %d" attempts;
-       return (FIN msg.id))
+       (FIN msg.id))
     else
       let delay = requeue_delay attempts in
-      return (REQ (msg.id, delay))
+      (REQ (msg.id, delay))
 
 let handle_frame frame handler max_attempts =
   let warn_return_none name msg = Lwt_log.ign_warning_f "%s: %s" name msg; return_none in
@@ -475,11 +475,11 @@ module Consumer = struct
   let open_breaker c conn mbox bs =
     (* Send RDY 0 and send retry trial command after a delay  *)
     Lwt_log.ign_debug "Breaker open, sending RDY 0";
-    send (RDY 0) conn >>= fun () ->
+    send (RDY 0) conn >|= fun () ->
     let bs = { error_count = bs.error_count + 1; position = Open } in
     let duration = backoff_duration c.config.backoff_multiplier bs.error_count in
     async (fun () -> do_after duration (fun () -> Lwt_mvar.put mbox TrialBreaker));
-    return bs
+    bs
 
   let update_breaker_state c conn open_breaker cmd bs =
     match cmd with
