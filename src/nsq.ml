@@ -627,12 +627,19 @@ module Producer = struct
   let ttl_seconds = 50.0 
 
   let create_pool address size =
-    let validate = fun c ->
+    let validate c =
       let now = Unix.time () in
       let diff = now -. !(c.last_send) in
       return (Float.(<) diff ttl_seconds)
     in
-    Lwt_pool.create size ~validate
+    (* Always return false so that we throw away connections where we encountered an error *)
+    let check _ is_ok = is_ok false in
+    let dispose c =
+      Lwt_log.ign_warning_f "Error publishing, closing connection";
+      Lwt_io.close (fst c.conn) >>= fun () ->
+      Lwt_io.close (snd c.conn)
+    in
+    Lwt_pool.create size ~validate ~check ~dispose
       begin
         fun () -> 
           connect address >>= fun conn ->
