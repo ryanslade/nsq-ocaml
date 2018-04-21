@@ -4,5 +4,5 @@ example:
 	$(JBUILDER) build @install
 
 clean:
-	rm -rf _build
+	$(JBUILDER) clean
 

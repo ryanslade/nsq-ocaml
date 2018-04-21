@@ -4,6 +4,8 @@ lib: [
 ]
 bin: [
   "_build/install/default/bin/example" {"example"}
+  "_build/install/default/bin/consume" {"consume"}
+  "_build/install/default/bin/publish" {"publish"}
 ]
 doc: [
   "_build/install/default/doc/nsq/README.md"

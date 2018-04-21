@@ -7,7 +7,7 @@ let max_backoff_seconds = 3600.0
 let default_nsqd_port = 4150
 let default_lookupd_port = 4161
 let default_lookupd_poll_seconds = 60.
-let network_buffer_size = 8192
+let network_buffer_size = 16 * 1024
 
 module Milliseconds = struct
   type t = Milliseconds of int64
@@ -196,11 +196,10 @@ let query_nsqlookupd ~topic a =
         return_error s
     end
 
-let bytes_of_pub t data = 
-  let ts = Topic.to_string t in
+let bytes_of_pub topic data =
   let buf = Bytes.create 4 in
   EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int @@ Bytes.length data);
-  Format.sprintf "PUB %s\n%s%s" ts (Bytes.to_string buf) (Bytes.to_string data)
+  Format.sprintf "PUB %s\n%s%s" (Topic.to_string topic) (Bytes.to_string buf) (Bytes.to_string data)
   |> Bytes.of_string
 
 (** 
@@ -212,8 +211,7 @@ let bytes_of_pub t data =
 
    <topic_name> - a valid string (optionally having #ephemeral suffix)
 *)
-let bytes_of_mpub t bodies =
-  let ts = Topic.to_string t in
+let bytes_of_mpub topic bodies =
   let body_count = List.length bodies in
   let data_size = List.fold_left (fun a b -> a + Bytes.length b) 0 bodies in
   let buf = Bytes.create (4 + 4 + (4*body_count) + data_size) in
@@ -227,7 +225,7 @@ let bytes_of_mpub t bodies =
       Bytes.blit b 0 buf !index (Bytes.length b);
       index := !index + Bytes.length b;
   ) bodies;
-  Format.sprintf "MPUB %s\n%s" ts (Bytes.to_string buf)
+  Format.sprintf "MPUB %s\n%s" (Topic.to_string topic) (Bytes.to_string buf)
   |> Bytes.of_string
 
 let bytes_of_command = function
@@ -243,7 +241,8 @@ let bytes_of_command = function
   | CLS -> Bytes.of_string "CLS\n"
   | AUTH secret -> 
     let buf = Bytes.create 4 in
-    EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int (String.length secret));
+    let length = String.length secret in
+    EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int length);
     Format.sprintf "AUTH\n%s%s" (Bytes.to_string buf) secret
     |> Bytes.of_string
 
