@@ -11,7 +11,7 @@ To compile the example program:
 *NOTE*: You will need to change the IP address to that of the docker host in example.ml
 
 ```
-opam install containers lwt ocplib-endian integers
+opam install containers lwt ocplib-endian integers cohttp-lwt-unix
 make
 ```
 
