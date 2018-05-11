@@ -2,7 +2,7 @@
 
 (executables
  ((names (example consume publish))
-  (libraries (nsq))))
+  (libraries (nsq logs logs.fmt fmt.tty))))
 
 (install
  ((section bin)
