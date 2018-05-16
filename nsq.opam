@@ -1,6 +1,6 @@
 opam-version: "1.2"
 name: "nsq"
-version: "0.2.3"
+version: "0.2.4"
 maintainer: "Ryan Slade <ryanslade@gmail.com>"
 authors: "Ryan Slade <ryanslade@gmail.com>"
 homepage: "https://github.com/ryanslade/nsq-ocaml"
@@ -18,7 +18,8 @@ depends: [
   "yojson"
   "ocaml-migrate-parsetree"
   "ppx_deriving_yojson"
+  "logs"
 ]
 available: [
-  ocaml-version >= "4.03.0"
+  ocaml-version >= "4.04.0"
 ]
