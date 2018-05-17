@@ -10,7 +10,7 @@ build: [["jbuilder" "build" "-p" name "-j" jobs]]
 depends: [
   "jbuilder" {build}
   "containers"
-  "lwt" 
+  "lwt" {>= "3.2.0"}
   "ocplib-endian" 
   "integers" 
   "cohttp"
