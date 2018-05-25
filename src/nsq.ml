@@ -81,9 +81,14 @@ type raw_message = {
 }
 
 module Address = struct
-  type t =
-    | Host of string
-    | HostPort of string * int
+  module T = struct
+    type t =
+      | Host of string
+      | HostPort of string * int
+    [@@deriving sexp_of, compare]
+  end
+  include T
+  include Comparable.Make(T)
 
   let host s =
     Host s
@@ -95,12 +100,6 @@ module Address = struct
     match a with
     | Host a -> a
     | HostPort (a, p) -> Printf.sprintf "%s:%d" a p
-
-  let compare a b =
-    String.compare (to_string a) (to_string b)
-
-  let equal a b =
-    String.equal (to_string a) (to_string b)
 end
 
 type command =
@@ -582,26 +581,26 @@ module Consumer = struct
     let rec check_for_producers running =
       Logs_lwt.debug (fun l -> l "Querying %d lookupd hosts" (List.length lookup_addresses)) >>= fun () ->
       Lwt_list.map_p (query_nsqlookupd ~topic:c.topic) lookup_addresses >>= fun results ->
-      let new_producers =
+      let discovered_producers =
         List.filter_map ~f:Result.ok results
         |> List.map ~f:producer_addresses
         |> List.join
-        |> List.dedup_and_sort ~compare:Address.compare
-        |> List.filter ~f:(fun a -> not @@ List.mem ~equal:Address.equal running a)
+        |> Set.of_list (module Address)
       in
-      Logs_lwt.debug (fun l -> l "Found %d new producers" (List.length new_producers)) >>= fun () ->
-      List.iter 
+      let new_producers = Set.diff discovered_producers running in
+      Logs_lwt.debug (fun l -> l "Found %d new producers" (Set.length new_producers)) >>= fun () ->
+      Set.iter 
         ~f:(fun a -> 
             async (fun () -> 
                 Logs_lwt.debug (fun l -> l "Starting consumer for: %s" (Address.to_string a)) >>= fun () ->
                 start_nsqd_consumer c a)
           ) 
         new_producers;
-      let running = List.merge ~cmp:Address.compare running new_producers |> List.dedup_and_sort in
+      let running = Set.union running new_producers in
       Lwt_unix.sleep default_lookupd_poll_seconds >>= fun () ->
       check_for_producers running
     in
-    check_for_producers []
+    check_for_producers (Set.empty (module Address))
 
   let run c =
     Lwt.async_exception_hook := async_exception_hook;
