@@ -41,7 +41,7 @@ let create_consumer ~mode chan_name handler =
        handler)
 
 let setup_logging level =
-  Logs.set_level (Some Logs.Debug);
+  Logs.set_level level;
   Fmt_tty.setup_std_outputs ();
   Logs.set_reporter (Logs_fmt.reporter ())
 
