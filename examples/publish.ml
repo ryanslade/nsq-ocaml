@@ -1,4 +1,4 @@
-open Containers
+open Base
 open Lwt
 open Nsq
 
@@ -15,9 +15,9 @@ let rec publish p =
     let msg = Int.to_string !published |> Bytes.of_string in
     Producer.publish p (Topic "Test") msg >>= function
     | Result.Ok _ -> 
-      incr published;
+      Int.incr published;
       if !published >= to_publish
-      then exit 0
+      then Caml.exit 0
       else loop ()
     | Result.Error e -> 
       Lwt_log.error e >>= fun () ->
@@ -31,7 +31,7 @@ let rate_logger () =
     Lwt_unix.sleep log_interval >>= fun () ->
     let published = !published in
     let elapsed = (Unix.gettimeofday ()) -. !start in
-    let per_sec = (float published) /. elapsed in
+    let per_sec = (Float.of_int published) /. elapsed in
     Lwt_log.debug_f "Published %d, %f/s" published per_sec >>= fun () ->
     loop ()
   in
@@ -48,7 +48,7 @@ let setup_logging level =
 
 let () = 
   setup_logging Lwt_log.Debug;
-  let p = Result.get_exn @@ Producer.create ~pool_size:concurrency (Host nsqd_address) in
+  let p = Result.ok_or_failwith @@ Producer.create ~pool_size:concurrency (Host nsqd_address) in
   let publishers = List.init concurrency (fun _ -> publish p) in
   start := Unix.gettimeofday ();
   Lwt_main.run @@ join ((rate_logger ()) :: publishers)

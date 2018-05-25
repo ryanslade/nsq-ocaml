@@ -1,4 +1,4 @@
-open Containers
+open Base
 open Lwt
 
 let ephemeral_suffix = "#ephemeral"
@@ -70,14 +70,14 @@ end
 
 type raw_frame = {
   frame_type: int32;
-  data: bytes; 
+  data: Bytes.t; 
 }
 
 type raw_message = {
   timestamp: int64;
   attempts: Unsigned.UInt16.t;
   id: MessageID.t;
-  body: bytes; 
+  body: Bytes.t; 
 }
 
 module Address = struct
@@ -94,7 +94,7 @@ module Address = struct
   let to_string a =
     match a with
     | Host a -> a
-    | HostPort (a, p) -> Format.sprintf "%s:%d" a p
+    | HostPort (a, p) -> Printf.sprintf "%s:%d" a p
 
   let compare a b =
     String.compare (to_string a) (to_string b)
@@ -107,8 +107,8 @@ type command =
   (* TODO: Identify *)
   | Magic
   | SUB of Topic.t * Channel.t
-  | PUB of Topic.t * bytes
-  | MPUB of Topic.t * bytes list
+  | PUB of Topic.t * Bytes.t
+  | MPUB of Topic.t * Bytes.t list
   | REQ of MessageID.t * Milliseconds.t
   | FIN of MessageID.t
   | TOUCH of MessageID.t
@@ -147,7 +147,12 @@ type lookup_response = {
 } [@@deriving yojson]
 
 let producer_addresses lr =
-  List.map (fun p -> Address.host_port p.broadcast_address p.tcp_port) lr.producers
+  List.map ~f:(fun p -> Address.host_port p.broadcast_address p.tcp_port) lr.producers
+
+let guard_str f =
+  match Result.try_with f with
+  | Ok _ as x -> x
+  | Error e -> Result.Error (Exn.to_string e)
 
 let lookup_response_from_string s =
   let open Result in
@@ -186,19 +191,19 @@ let query_nsqlookupd ~topic a =
           Cohttp_lwt.Body.to_string body >>= fun body ->
           log_and_return "Error parsing lookup response" @@ lookup_response_from_string body
         | status ->
-          return_error (Format.sprintf "Expected %s, got %s" (Code.string_of_status `OK) (Code.string_of_status status))
+          return_error (Printf.sprintf "Expected %s, got %s" (Code.string_of_status `OK) (Code.string_of_status status))
     end
     begin
       fun e ->
-        let s = Printexc.to_string e in
+        let s = Exn.to_string e in
         Logs_lwt.err (fun l -> l "Querying lookupd `%s`: %s" (Address.to_string a) s) >>= fun () ->
         return_error s
     end
 
 let bytes_of_pub topic data =
   let buf = Bytes.create 4 in
-  EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int @@ Bytes.length data);
-  Format.sprintf "PUB %s\n%s%s" (Topic.to_string topic) (Bytes.to_string buf) (Bytes.to_string data)
+  EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int_exn @@ Bytes.length data);
+  Printf.sprintf "PUB %s\n%s%s" (Topic.to_string topic) (Bytes.to_string buf) (Bytes.to_string data)
   |> Bytes.of_string
 
 (** 
@@ -212,37 +217,37 @@ let bytes_of_pub topic data =
 *)
 let bytes_of_mpub topic bodies =
   let body_count = List.length bodies in
-  let data_size = List.fold_left (fun a b -> a + Bytes.length b) 0 bodies in
+  let data_size = List.fold_left ~f:(fun a b -> a + Bytes.length b) ~init:0 bodies in
   let buf = Bytes.create (4 + 4 + (4*body_count) + data_size) in
-  EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int @@ data_size);
-  EndianBytes.BigEndian.set_int32 buf 4 (Int32.of_int body_count);
+  EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int_exn @@ data_size);
+  EndianBytes.BigEndian.set_int32 buf 4 (Int32.of_int_exn body_count);
   let index = ref 8 in
-  List.iter (
+  List.iter ~f:(
     fun b -> 
-      EndianBytes.BigEndian.set_int32 buf !index (Int32.of_int @@ Bytes.length b);
+      EndianBytes.BigEndian.set_int32 buf !index (Int32.of_int_exn @@ Bytes.length b);
       index := !index + 4;
       Bytes.blit b 0 buf !index (Bytes.length b);
       index := !index + Bytes.length b;
   ) bodies;
-  Format.sprintf "MPUB %s\n%s" (Topic.to_string topic) (Bytes.to_string buf)
+  Printf.sprintf "MPUB %s\n%s" (Topic.to_string topic) (Bytes.to_string buf)
   |> Bytes.of_string
 
 let bytes_of_command = function
   | Magic -> Bytes.of_string "  V2" 
   | NOP -> Bytes.of_string "NOP\n"
-  | RDY i -> Format.sprintf "RDY %i\n" i |> Bytes.of_string
-  | FIN id -> Format.sprintf "FIN %s\n" (MessageID.to_string id) |> Bytes.of_string
-  | TOUCH id -> Format.sprintf "TOUCH %s\n" (MessageID.to_string id) |> Bytes.of_string
-  | SUB (t, c) -> Format.sprintf "SUB %s %s\n" (Topic.to_string t) (Channel.to_string c) |> Bytes.of_string
-  | REQ (id, delay) -> Format.sprintf "REQ %s %Li\n" (MessageID.to_string id) (Milliseconds.value delay) |> Bytes.of_string
+  | RDY i -> Printf.sprintf "RDY %i\n" i |> Bytes.of_string
+  | FIN id -> Printf.sprintf "FIN %s\n" (MessageID.to_string id) |> Bytes.of_string
+  | TOUCH id -> Printf.sprintf "TOUCH %s\n" (MessageID.to_string id) |> Bytes.of_string
+  | SUB (t, c) -> Printf.sprintf "SUB %s %s\n" (Topic.to_string t) (Channel.to_string c) |> Bytes.of_string
+  | REQ (id, delay) -> Printf.sprintf "REQ %s %Li\n" (MessageID.to_string id) (Milliseconds.value delay) |> Bytes.of_string
   | PUB (t, data) -> bytes_of_pub t data
   | MPUB (t, data) -> bytes_of_mpub t data
   | CLS -> Bytes.of_string "CLS\n"
   | AUTH secret -> 
     let buf = Bytes.create 4 in
     let length = String.length secret in
-    EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int length);
-    Format.sprintf "AUTH\n%s%s" (Bytes.to_string buf) secret
+    EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int_exn length);
+    Printf.sprintf "AUTH\n%s%s" (Bytes.to_string buf) secret
     |> Bytes.of_string
 
 let send command (_, oc) =
@@ -265,14 +270,15 @@ let connect host =
     | Address.HostPort (h, p) -> (h, p)
   in
   Lwt_unix.gethostbyname host >>= fun info ->
-  match Array.get_safe info.h_addr_list 0 with
-  | None -> fail_with "Host lookup failed"
-  | Some host ->
+  try
+    let host = Array.get info.h_addr_list 0 in
     let addr = Unix.ADDR_INET(host, port) in
     Lwt_io.open_connection 
       ~in_buffer:(Lwt_bytes.create network_buffer_size)
       ~out_buffer:(Lwt_bytes.create network_buffer_size)
       addr
+  with
+    _ -> fail_with "Host lookup failed"
 
 let frame_from_bytes bytes =
   let frame_type = EndianBytes.BigEndian.get_int32 bytes 0 in
@@ -282,7 +288,7 @@ let frame_from_bytes bytes =
 
 let read_raw_frame (ic, _) =
   Lwt_io.BE.read_int32 ic >>= fun size ->
-  let size = Int32.to_int size in
+  let size = Int32.to_int_exn size in
   let bytes = Bytes.create size in
   Lwt_io.read_into_exactly ic bytes 0 size >|= fun () ->
   frame_from_bytes bytes
@@ -292,7 +298,7 @@ let parse_response_body body =
   match body with
   | "OK" -> Result.Ok ResponseOk
   | "_heartbeat_" -> Result.Ok Heartbeat
-  | _ -> Result.Error (Format.sprintf "Unknown response: %s" body)
+  | _ -> Result.Error (Printf.sprintf "Unknown response: %s" body)
 
 let parse_message_body_exn body =
   let timestamp = EndianBytes.BigEndian.get_int64 body 0 in
@@ -303,25 +309,27 @@ let parse_message_body_exn body =
   Message { timestamp; attempts; id; body; }
 
 let parse_message_body body =
-  Result.guard_str @@ fun () -> parse_message_body_exn body
+  guard_str @@ fun () -> parse_message_body_exn body
 
 let parse_error_body body =
-  match String.Split.left ~by:" " (Bytes.to_string body) with
-  | None -> Result.Error (Format.sprintf "Malformed error code: %s" (Bytes.to_string body))
-  | Some (code, detail) ->
-    match code with
-    | "E_INVALID" -> Result.return @@ ErrorInvalid detail
-    | "E_BAD_TOPIC" -> Result.return @@ ErrorBadTopic detail
-    | "E_BAD_CHANNEL" -> Result.return @@ ErrorBadChannel detail
-    | "E_FIN_FAILED" -> Result.return @@ ErrorFINFailed detail
-    | _ -> Result.Error (Format.sprintf "Unknown error code: %s. %s" code detail)
+  match String.split ~on:' ' (Bytes.to_string body) with
+  | [code; detail] ->
+    begin 
+      match code with 
+      | "E_INVALID" -> Result.return @@ ErrorInvalid detail
+      | "E_BAD_TOPIC" -> Result.return @@ ErrorBadTopic detail
+      | "E_BAD_CHANNEL" -> Result.return @@ ErrorBadChannel detail
+      | "E_FIN_FAILED" -> Result.return @@ ErrorFINFailed detail
+      | _ -> Result.Error (Printf.sprintf "Unknown error code: %s. %s" code detail)
+    end
+  | _ -> Result.Error (Printf.sprintf "Malformed error code: %s" (Bytes.to_string body))
 
 let server_message_of_frame raw =
   match (FrameType.of_int32 raw.frame_type) with
   | FrameResponse -> parse_response_body raw.data
   | FrameMessage -> parse_message_body raw.data
   | FrameError -> parse_error_body raw.data
-  | FrameUnknown i -> Result.Error (Format.sprintf "Unknown frame type: %li" i)
+  | FrameUnknown i -> Result.Error (Printf.sprintf "Unknown frame type: %li" i)
 
 let subscribe topic channel conn =
   send (SUB (topic, channel)) conn >>= fun () ->
@@ -341,7 +349,7 @@ let handle_message handler msg max_attempts =
     function
     | Result.Ok r -> return r
     | Result.Error e ->
-      Logs_lwt.err (fun l -> l "Handler error: %s" (Printexc.to_string e)) >>= fun () ->
+      Logs_lwt.err (fun l -> l "Handler error: %s" (Exn.to_string e)) >>= fun () ->
       return HandlerRequeue
   end
   >>= function
@@ -381,12 +389,12 @@ module Consumer = struct
   let validate_positive c value name =
     if value > 0
     then Result.Ok c
-    else Result.Error (Format.sprintf "%s must be greater than 0" name)
+    else Result.Error (Printf.sprintf "%s must be greater than 0" name)
 
   let validate_between min max value name c =
     if value >= min && value <= max
     then Result.Ok c
-    else Result.Error (Format.sprintf "%s must be between %d and %d, got %d" name min max value)
+    else Result.Error (Printf.sprintf "%s must be between %d and %d, got %d" name min max value)
 
   let max_in_flight_positive c =
     validate_positive c c.max_in_flight "max_in_flight"
@@ -419,7 +427,7 @@ module Consumer = struct
   }
 
   let backoff_duration backoff_multiplier error_count =
-    let bo = (backoff_multiplier *. (float_of_int error_count)) in
+    let bo = (backoff_multiplier *. (Float.of_int error_count)) in
     Float.min bo max_backoff_seconds
 
   type mode =
@@ -439,7 +447,7 @@ module Consumer = struct
   let create ?(mode=ModeNsqd) ?(config=default_config_value) addresses topic channel handler =
     let num_addresses = List.length addresses in
     match validate_config config with
-    | Result.Error s -> Result.Error (Format.sprintf "Invalid config: %s" s)
+    | Result.Error s -> Result.Error (Printf.sprintf "Invalid config: %s" s)
     | Result.Ok config ->
       let desired_rdy = max 1 (config.max_in_flight / num_addresses) in
       Result.return { 
@@ -551,7 +559,7 @@ module Consumer = struct
     | Result.Ok conn ->
       let handle_ex e = 
         Lwt.join [
-          Logs_lwt.err (fun l -> l "Reader failed: %s" (Printexc.to_string e));
+          Logs_lwt.err (fun l -> l "Reader failed: %s" (Exn.to_string e));
           (Lwt_io.close (fst conn));
           (Lwt_io.close (snd conn));
           (Lwt_unix.sleep default_backoff_seconds)]
@@ -559,41 +567,41 @@ module Consumer = struct
       catch (fun () -> consume c conn mbox) handle_ex >>= fun () ->
       main_loop c address mbox
     | Result.Error e ->
-      Logs_lwt.err (fun l -> l "Connecting to consumer '%s': %s" (Address.to_string address) (Printexc.to_string e)) >>= fun () ->
+      Logs_lwt.err (fun l -> l "Connecting to consumer '%s': %s" (Address.to_string address) (Exn.to_string e)) >>= fun () ->
       Lwt_unix.sleep default_backoff_seconds >>= fun () ->
       main_loop c address mbox
 
   let async_exception_hook e =
-    Logs.err (fun l -> l "Async exception: %s" (Printexc.to_string e))
+    Logs.err (fun l -> l "Async exception: %s" (Exn.to_string e))
 
   let start_nsqd_consumer c address =
     let mbox = Lwt_mvar.create_empty () in
     main_loop c address mbox
 
-  (* Return only succesful results, but log the errors found *)
   let start_polling_lookupd c lookup_addresses =
-    let rec internal running =
+    let rec check_for_producers running =
       Logs_lwt.debug (fun l -> l "Querying %d lookupd hosts" (List.length lookup_addresses)) >>= fun () ->
       Lwt_list.map_p (query_nsqlookupd ~topic:c.topic) lookup_addresses >>= fun results ->
       let new_producers =
-        List.keep_ok results
-        |> List.flat_map producer_addresses
-        |> List.sort_uniq ~cmp:Address.compare
-        |> List.filter (fun a -> not @@ List.mem ~eq:Address.equal a running)
+        List.filter_map ~f:Result.ok results
+        |> List.map ~f:producer_addresses
+        |> List.join
+        |> List.dedup_and_sort ~compare:Address.compare
+        |> List.filter ~f:(fun a -> not @@ List.mem ~equal:Address.equal running a)
       in
       Logs_lwt.debug (fun l -> l "Found %d new producers" (List.length new_producers)) >>= fun () ->
       List.iter 
-        (fun a -> 
-           async (fun () -> 
-               Logs_lwt.debug (fun l -> l "Starting consumer for: %s" (Address.to_string a)) >>= fun () ->
-               start_nsqd_consumer c a)
-        ) 
+        ~f:(fun a -> 
+            async (fun () -> 
+                Logs_lwt.debug (fun l -> l "Starting consumer for: %s" (Address.to_string a)) >>= fun () ->
+                start_nsqd_consumer c a)
+          ) 
         new_producers;
-      let running = List.union ~eq:Address.equal running new_producers in
+      let running = List.merge ~cmp:Address.compare running new_producers |> List.dedup_and_sort in
       Lwt_unix.sleep default_lookupd_poll_seconds >>= fun () ->
-      internal running
+      check_for_producers running
     in
-    internal []
+    check_for_producers []
 
   let run c =
     Lwt.async_exception_hook := async_exception_hook;
@@ -602,7 +610,7 @@ module Consumer = struct
       Logs_lwt.debug (fun l -> l "Starting lookupd poll") >>= fun () ->
       start_polling_lookupd c c.addresses
     | ModeNsqd ->
-      let consumers = List.map (fun a -> start_nsqd_consumer c a) c.addresses in
+      let consumers = List.map ~f:(fun a -> start_nsqd_consumer c a) c.addresses in
       Lwt.join consumers
 
 end
@@ -663,7 +671,7 @@ module Producer = struct
           c.last_send := Unix.time ();
           read_until_ok ()
         | Result.Ok _ -> return_error "Expected OK or Heartbeat, got another message"
-        | Result.Error e -> return_error (Format.sprintf "Received error: %s" e)
+        | Result.Error e -> return_error (Printf.sprintf "Received error: %s" e)
       in
       send cmd c.conn >>= fun () ->
       c.last_send := Unix.time ();
@@ -671,7 +679,7 @@ module Producer = struct
     in
     let try_publish () = Lwt_pool.use t.pool with_conn in
     let handle_ex e =
-      let message = Format.sprintf "Publishing to `%s`: %s" (Address.to_string t.address) (Printexc.to_string e) in
+      let message = Printf.sprintf "Publishing to `%s`: %s" (Address.to_string t.address) (Exn.to_string e) in
       return_error message
     in
     catch try_publish handle_ex

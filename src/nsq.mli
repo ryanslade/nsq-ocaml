@@ -1,5 +1,3 @@
-open Containers
-
 module Address : sig
   type t =
     | Host of string
@@ -34,9 +32,9 @@ type handler_result =
 
 module Producer : sig
   type t
-  val create : ?pool_size:int -> Address.t -> (t, string) Result.t
-  val publish : t -> Topic.t -> bytes -> (unit, string) Result.t Lwt.t
-  val publish_multi : t -> Topic.t -> bytes list -> (unit, string) Result.t Lwt.t
+  val create : ?pool_size:int -> Address.t -> (t, string) result
+  val publish : t -> Topic.t -> bytes -> (unit, string) result Lwt.t
+  val publish_multi : t -> Topic.t -> bytes list -> (unit, string) result Lwt.t
 end
 
 module Consumer : sig
@@ -54,7 +52,7 @@ module Consumer : sig
     | ModeNsqd
     | ModeLookupd
 
-  val create : ?mode:mode -> ?config:config -> Address.t list -> Topic.t -> Channel.t -> (bytes -> handler_result Lwt.t) -> (t, string) Result.t
+  val create : ?mode:mode -> ?config:config -> Address.t list -> Topic.t -> Channel.t -> (bytes -> handler_result Lwt.t) -> (t, string) result
   val run : t -> unit Lwt.t
 end
 

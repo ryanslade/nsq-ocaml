@@ -1,4 +1,4 @@
-open Containers
+open Base
 open Lwt
 open Nsq
 
@@ -14,10 +14,10 @@ let rate_logger () =
     Lwt_unix.sleep log_interval >>= fun () ->
     let consumed = !consumed in
     let elapsed = (Unix.gettimeofday ()) -. !start in
-    let per_sec = (float consumed) /. elapsed in
+    let per_sec = (Float.of_int consumed) /. elapsed in
     Lwt_log.debug_f "Consumed %d, %f/s" consumed per_sec >>= fun () ->
     if consumed >= expected
-    then exit 0
+    then Caml.exit 0
     else loop ()
   in
   loop ()
@@ -40,7 +40,7 @@ let () =
   let dc = Consumer.default_config () in
   let config = Consumer.{dc with max_in_flight = in_flight} in
   let consumer = 
-    Result.get_exn  
+    Result.ok_or_failwith
       (Consumer.create
          ~mode:Consumer.ModeNsqd
          ~config
