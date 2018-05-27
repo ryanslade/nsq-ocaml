@@ -31,11 +31,16 @@ let rec test_publish () =
 let create_consumer ~mode chan_name handler =
   let dc = Consumer.default_config () in
   let config = Consumer.{dc with max_in_flight = 100;} in
+  let address =
+    match mode with
+    | Consumer.ModeNsqd -> nsqd_address
+    | Consumer.ModeLookupd -> lookupd_address
+  in
   Result.ok_or_failwith
     (Consumer.create 
        ~mode
        ~config
-       [(Host nsqd_address)]
+       [(Host address)]
        (Topic "Test") 
        (Channel chan_name)
        handler)
