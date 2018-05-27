@@ -8,6 +8,7 @@ let default_nsqd_port = 4150
 let default_lookupd_port = 4161
 let default_lookupd_poll_seconds = 60.
 let network_buffer_size = 16 * 1024
+let recalculate_rdy_interval = 60.0
 
 module Milliseconds = struct
   type t = Milliseconds of int64
@@ -380,6 +381,7 @@ let handle_frame frame handler max_attempts =
 
 module Consumer = struct
   type config = {
+    (* The total number of messages allowed in flight for all connections of this consumer *)
     max_in_flight : int;
     max_attempts : int;
     backoff_multiplier : float;
@@ -435,29 +437,35 @@ module Consumer = struct
 
   type t = {
     addresses : Address.t list;
-    desired_rdy : int;
+    (* The number of open NSQD connections *)
+    mutable nsqd_connections : int;
     topic : Topic.t;
     channel : Channel.t;
     handler : (bytes -> handler_result Lwt.t);
     config : config;
     mode : mode;
+    log_prefix : string;
   }
 
   let create ?(mode=ModeNsqd) ?(config=default_config_value) addresses topic channel handler =
-    let num_addresses = List.length addresses in
     match validate_config config with
     | Result.Error s -> Result.Error (Printf.sprintf "Invalid config: %s" s)
     | Result.Ok config ->
-      let desired_rdy = max 1 (config.max_in_flight / num_addresses) in
       Result.return { 
         addresses;
-        desired_rdy;
+        nsqd_connections = 0;
         topic; 
         channel; 
         handler;
         config;
         mode;
+        log_prefix = Printf.sprintf "%s/%s" (Topic.to_string topic) (Channel.to_string channel);
       }
+
+  let rdy_per_connection c =
+    if c.nsqd_connections = 0 || (c.config.max_in_flight < c.nsqd_connections)
+    then 1
+    else c.config.max_in_flight / c.nsqd_connections
 
   let do_after duration f =
     Logs_lwt.debug (fun l -> l "Sleeping for %f seconds" duration) >>= fun () ->
@@ -468,6 +476,7 @@ module Consumer = struct
     | Command of command
     | TrialBreaker
     | ConnectionError of exn
+    | RecalcRDY
 
   let rec read_loop conn mbox =
     let put_async m = Lwt.async @@ fun () -> Lwt_mvar.put mbox m in
@@ -507,8 +516,9 @@ module Consumer = struct
       | false, Open -> return bs
       | false, HalfOpen ->
         (* Passed test  *)
-        Logs_lwt.debug (fun l -> l "Trial passed, sending RDY %d" c.desired_rdy) >>= fun () ->
-        send (RDY c.desired_rdy) conn >>= fun () ->
+        let rdy = rdy_per_connection c in
+        Logs_lwt.debug (fun l -> l "%s Trial passed, sending RDY %d" c.log_prefix rdy) >>= fun () ->
+        send (RDY rdy) conn >>= fun () ->
         return { position = Closed; error_count = 0; }
 
   let consume c conn mbox =
@@ -529,24 +539,34 @@ module Consumer = struct
               end;
             mbox_loop bs
           | Result.Error s -> 
-            Logs_lwt.err (fun l -> l "Error parsing response: %s" s) >>= fun () ->
+            Logs_lwt.err (fun l -> l "%s Error parsing response: %s" c.log_prefix s) >>= fun () ->
             mbox_loop bs
         end
       | Command cmd ->
         send cmd conn >>= fun () ->
         update_breaker_state cmd bs >>= mbox_loop
       | TrialBreaker ->
-        Logs_lwt.debug (fun l -> l "Breaker trial, sending RDY 1 (Error count: %i)" bs.error_count) >>= fun () ->
+        Logs_lwt.debug (fun l -> l "%s Breaker trial, sending RDY 1 (Error count: %i)" c.log_prefix  bs.error_count) >>= fun () ->
         let bs = { bs with position = HalfOpen } in
         send (RDY 1) conn >>=  fun () ->
         mbox_loop bs
       | ConnectionError e ->
         fail e 
+      | RecalcRDY ->
+        (* Only recalc and send if breaker is closed  *)
+        match bs.position with
+        | Open -> mbox_loop bs
+        | HalfOpen -> mbox_loop bs
+        | Closed -> 
+          let rdy = rdy_per_connection c in
+          Logs_lwt.debug (fun l -> l "%s Sending recalculated RDY %d" c.log_prefix rdy) >>= fun () ->
+          send (RDY rdy) conn >>= fun () ->
+          mbox_loop bs
     in
     send Magic conn >>= fun () ->
     subscribe c.topic c.channel conn >>= fun () ->
-    (* Start cautiously by sending RDY 1 *)
-    Logs_lwt.debug (fun l -> l "Sending initial RDY 1") >>= fun () ->
+    (* Start cautiously by sending RDY 1 *) 
+    Logs_lwt.debug (fun l -> l "%s Sending initial RDY 1" c.log_prefix) >>= fun () ->
     send (RDY 1) conn >>= fun () ->
     (* Start background reader *)
     Lwt.async (fun () -> read_loop conn mbox);
@@ -558,15 +578,20 @@ module Consumer = struct
     | Result.Ok conn ->
       let handle_ex e = 
         Lwt.join [
-          Logs_lwt.err (fun l -> l "Reader failed: %s" (Exn.to_string e));
+          Logs_lwt.err (fun l -> l "Consumer connection error: %s" (Exn.to_string e));
           (Lwt_io.close (fst conn));
           (Lwt_io.close (snd conn));
           (Lwt_unix.sleep default_backoff_seconds)]
       in
+      c.nsqd_connections <- c.nsqd_connections + 1;
+      Logs_lwt.debug ( fun l -> l "%s %d connections" c.log_prefix c.nsqd_connections) >>= fun () ->
       catch (fun () -> consume c conn mbox) handle_ex >>= fun () ->
+      (* If we get here it means that something failed and we need to reconnect *)
+      c.nsqd_connections <- (max 0 (c.nsqd_connections - 1));
+      Logs_lwt.debug ( fun l -> l "%s %d connections" c.log_prefix c.nsqd_connections) >>= fun () ->
       main_loop c address mbox
     | Result.Error e ->
-      Logs_lwt.err (fun l -> l "Connecting to consumer '%s': %s" (Address.to_string address) (Exn.to_string e)) >>= fun () ->
+      Logs_lwt.err (fun l -> l "%s Connecting to consumer '%s': %s" c.log_prefix (Address.to_string address) (Exn.to_string e)) >>= fun () ->
       Lwt_unix.sleep default_backoff_seconds >>= fun () ->
       main_loop c address mbox
 
@@ -575,6 +600,26 @@ module Consumer = struct
 
   let start_nsqd_consumer c address =
     let mbox = Lwt_mvar.create_empty () in
+    async 
+      (** 
+         Start an async thread to update RDY count occasionaly.
+         The number of open connections can change as we add new consumers due to lookupd
+         discovering producers or we have connection failures. Each time a new connection 
+         is opened or closed the consumer.nsqd_connections field is updated.
+         We therefore need to occasionaly update our RDY count as this may have changed so that
+         it is spread evenly across connections.
+      *)
+      begin
+        fun () ->
+          let jitter = Random.float (recalculate_rdy_interval /. 10.0) in
+          let interval = recalculate_rdy_interval +. jitter in
+          let rec loop () =
+            Lwt_unix.sleep interval >>= fun () ->
+            Logs_lwt.debug ( fun l -> l "%s recalculating RDY" c.log_prefix) >>= fun () ->
+            Lwt_mvar.put mbox RecalcRDY >>= loop
+          in
+          loop ()
+      end;
     main_loop c address mbox
 
   let start_polling_lookupd c lookup_addresses =
