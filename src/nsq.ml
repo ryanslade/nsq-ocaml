@@ -139,12 +139,12 @@ type lookup_producer = {
   tcp_port: int;
   http_port: int;
   version: string;
-} [@@deriving yojson]
+} [@@deriving yojson { strict = false }]
 
 type lookup_response = {
   channels: string list;
   producers: lookup_producer list;
-} [@@deriving yojson]
+} [@@deriving yojson { strict = false }]
 
 let producer_addresses lr =
   List.map ~f:(fun p -> Address.host_port p.broadcast_address p.tcp_port) lr.producers
