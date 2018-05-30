@@ -44,6 +44,9 @@ module Consumer : sig
     max_in_flight : int;
     max_attempts : int;
     backoff_multiplier : float;
+    dial_timeout : float;
+    read_timeout : float;
+    write_timeout : float;
   }
 
   val default_config : unit -> config

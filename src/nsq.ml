@@ -250,10 +250,16 @@ let bytes_of_command = function
     Printf.sprintf "AUTH\n%s%s" (Bytes.to_string buf) secret
     |> Bytes.of_string
 
-let send command (_, oc) =
-  bytes_of_command command 
-  |> Bytes.to_string
-  |> Lwt_io.write oc
+(* Timeout will only apply if > 0.0 *)
+let maybe_timeout ?timeout f =
+  match timeout with
+  | None -> f ()
+  | Some t when Float.(t <= 0.0) -> f ()
+  | Some t -> Lwt_unix.with_timeout t f
+
+let send command (_, oc) timeout =
+  let data = bytes_of_command command |> Bytes.to_string in
+  maybe_timeout ~timeout (fun () -> Lwt_io.write oc data)
 
 let catch_result promise =
   try_bind 
@@ -264,7 +270,7 @@ let catch_result promise =
 let catch_result1 f x =
   catch_result (fun () -> f x)
 
-let connect host =
+let connect host timeout =
   let (host, port) = match host with
     | Address.Host h          -> (h, default_nsqd_port)
     | Address.HostPort (h, p) -> (h, p)
@@ -273,10 +279,12 @@ let connect host =
   try
     let host = Array.get info.h_addr_list 0 in
     let addr = Unix.ADDR_INET(host, port) in
-    Lwt_io.open_connection 
-      ~in_buffer:(Lwt_bytes.create network_buffer_size)
-      ~out_buffer:(Lwt_bytes.create network_buffer_size)
-      addr
+    maybe_timeout ~timeout (fun () ->
+        Lwt_io.open_connection
+          ~in_buffer:(Lwt_bytes.create network_buffer_size)
+          ~out_buffer:(Lwt_bytes.create network_buffer_size)
+          addr
+      )
   with
     _ -> fail_with "Host lookup failed"
 
@@ -331,8 +339,8 @@ let server_message_of_frame raw =
   | FrameError -> parse_error_body raw.data
   | FrameUnknown i -> Result.Error (Printf.sprintf "Unknown frame type: %li" i)
 
-let subscribe topic channel conn =
-  send (SUB (topic, channel)) conn >>= fun () ->
+let subscribe topic channel conn timeout =
+  send (SUB (topic, channel)) conn timeout >>= fun () ->
   read_raw_frame conn >>= fun raw ->
   match server_message_of_frame raw with
   | Result.Ok ResponseOk -> return_unit
@@ -385,6 +393,11 @@ module Consumer = struct
     max_in_flight : int;
     max_attempts : int;
     backoff_multiplier : float;
+
+    (* network timeouts in seconds *)
+    dial_timeout : float;
+    read_timeout : float;
+    write_timeout : float;
   }
 
   let validate_positive c value name =
@@ -412,6 +425,9 @@ module Consumer = struct
     max_in_flight = 1;
     max_attempts = 5;
     backoff_multiplier = 0.5;
+    dial_timeout = 1.0;
+    read_timeout = 60.0;
+    write_timeout = 1.0;
   }
 
   let default_config () =
@@ -491,7 +507,7 @@ module Consumer = struct
   let open_breaker c conn mbox bs =
     (* Send RDY 0 and send retry trial command after a delay  *)
     Logs_lwt.debug (fun l -> l "Breaker open, sending RDY 0") >>= fun () ->
-    send (RDY 0) conn >|= fun () ->
+    send (RDY 0) conn c.config.dial_timeout >|= fun () ->
     let bs = { error_count = bs.error_count + 1; position = Open } in
     let duration = backoff_duration c.config.backoff_multiplier bs.error_count in
     async (fun () -> do_after duration (fun () -> Lwt_mvar.put mbox TrialBreaker));
@@ -518,7 +534,7 @@ module Consumer = struct
         (* Passed test  *)
         let rdy = rdy_per_connection c in
         Logs_lwt.debug (fun l -> l "%s Trial passed, sending RDY %d" c.log_prefix rdy) >>= fun () ->
-        send (RDY rdy) conn >>= fun () ->
+        send (RDY rdy) conn c.config.write_timeout >>= fun () ->
         return { position = Closed; error_count = 0; }
 
   let consume c conn mbox =
@@ -543,12 +559,12 @@ module Consumer = struct
             mbox_loop bs
         end
       | Command cmd ->
-        send cmd conn >>= fun () ->
+        send cmd conn c.config.write_timeout >>= fun () ->
         update_breaker_state cmd bs >>= mbox_loop
       | TrialBreaker ->
         Logs_lwt.debug (fun l -> l "%s Breaker trial, sending RDY 1 (Error count: %i)" c.log_prefix  bs.error_count) >>= fun () ->
         let bs = { bs with position = HalfOpen } in
-        send (RDY 1) conn >>=  fun () ->
+        send (RDY 1) conn c.config.write_timeout >>=  fun () ->
         mbox_loop bs
       | ConnectionError e ->
         fail e 
@@ -560,21 +576,21 @@ module Consumer = struct
         | Closed -> 
           let rdy = rdy_per_connection c in
           Logs_lwt.debug (fun l -> l "%s Sending recalculated RDY %d" c.log_prefix rdy) >>= fun () ->
-          send (RDY rdy) conn >>= fun () ->
+          send (RDY rdy) conn c.config.write_timeout >>= fun () ->
           mbox_loop bs
     in
-    send Magic conn >>= fun () ->
-    subscribe c.topic c.channel conn >>= fun () ->
+    send Magic conn c.config.write_timeout >>= fun () ->
+    subscribe c.topic c.channel conn c.config.dial_timeout >>= fun () ->
     (* Start cautiously by sending RDY 1 *) 
     Logs_lwt.debug (fun l -> l "%s Sending initial RDY 1" c.log_prefix) >>= fun () ->
-    send (RDY 1) conn >>= fun () ->
+    send (RDY 1) conn c.config.write_timeout >>= fun () ->
     (* Start background reader *)
     Lwt.async (fun () -> read_loop conn mbox);
     let initial_state = { position = HalfOpen; error_count = 0; } in
     mbox_loop initial_state
 
   let rec main_loop c address mbox =
-    catch_result (fun () -> connect address) >>= function
+    catch_result (fun () -> connect address c.config.dial_timeout) >>= function
     | Result.Ok conn ->
       let handle_ex e = 
         Lwt.join [
@@ -671,6 +687,8 @@ module Producer = struct
   }
 
   let default_pool_size = 5
+  let default_dial_timeout = 15.0
+  let default_write_timeout = 15.0
 
   (** Throw away connections that are idle for this long
        Note that NSQ expects hearbeats to be answered every 30 seconds
@@ -693,8 +711,8 @@ module Producer = struct
     Lwt_pool.create size ~validate ~check ~dispose
       begin
         fun () -> 
-          connect address >>= fun conn ->
-          send Magic conn >>= fun () ->
+          connect address default_dial_timeout >>= fun conn ->
+          send Magic conn default_write_timeout >>= fun () ->
           let last_send = ref (Unix.time ()) in
           return { conn; last_send }
       end
@@ -711,13 +729,13 @@ module Producer = struct
         match server_message_of_frame frame with
         | Result.Ok ResponseOk -> return_ok ()
         | Result.Ok Heartbeat -> 
-          send NOP c.conn >>= fun () -> 
+          send NOP c.conn default_write_timeout >>= fun () ->
           c.last_send := Unix.time ();
           read_until_ok ()
         | Result.Ok _ -> return_error "Expected OK or Heartbeat, got another message"
         | Result.Error e -> return_error (Printf.sprintf "Received error: %s" e)
       in
-      send cmd c.conn >>= fun () ->
+      send cmd c.conn default_write_timeout >>= fun () ->
       c.last_send := Unix.time ();
       read_until_ok ()
     in
