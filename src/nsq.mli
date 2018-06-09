@@ -40,22 +40,34 @@ end
 module Consumer : sig
   type t
 
-  type config = {
-    max_in_flight : int;
-    max_attempts : int;
-    backoff_multiplier : float;
-    dial_timeout : float;
-    read_timeout : float;
-    write_timeout : float;
-  }
+  type config
 
-  val default_config : unit -> config
+  val create_config :
+    ?max_in_flight:int
+    -> ?max_attempts:int
+    -> ?backoff_multiplier:float
+    -> ?dial_timeout:float
+    -> ?read_timeout:float
+    -> ?write_timeout:float
+    -> ?lookupd_poll_interval:float
+    -> ?lookupd_poll_jitter:float
+    -> ?heartbeat_interval:float
+    -> ?max_requeue_delay:float
+    -> ?default_requeue_delay:float
+    -> ?client_id:string
+    -> ?hostname:string
+    -> ?user_agent:string
+    -> ?output_buffer_size:int
+    -> ?output_buffer_timeout:float
+    -> ?sample_rate : int
+    -> unit
+    -> (config, string) result
 
   type mode =
     | ModeNsqd
     | ModeLookupd
 
-  val create : ?mode:mode -> ?config:config -> Address.t list -> Topic.t -> Channel.t -> (bytes -> handler_result Lwt.t) -> (t, string) result
+  val create : ?mode:mode -> ?config:config -> Address.t list -> Topic.t -> Channel.t -> (bytes -> handler_result Lwt.t) -> t
   val run : t -> unit Lwt.t
 end
 

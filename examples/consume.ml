@@ -37,20 +37,18 @@ let handler msg =
 
 let () = 
   setup_logging Lwt_log.Debug;
-  let dc = Consumer.default_config () in
-  let config = Consumer.{dc with max_in_flight = in_flight} in
+  let config = Consumer.create_config ~max_in_flight:in_flight () |> Result.ok_or_failwith in
   let consumer = 
-    Result.ok_or_failwith
-      (Consumer.create
-         ~mode:Consumer.ModeNsqd
-         ~config
-         [(Host nsqd_address)]
-         (Topic "Test") 
-         (Channel "benchmark")
-         handler)
+    Consumer.create
+      ~mode:Consumer.ModeNsqd
+      ~config
+      [(Host nsqd_address)]
+      (Topic "Test") 
+      (Channel "benchmark")
+      handler
   in
-  let consumer = Consumer.run consumer in
+  let running = Consumer.run consumer in
   let logger = rate_logger () in
   start := Unix.gettimeofday ();
-  Lwt_main.run @@ join [logger; consumer]
+  Lwt_main.run @@ join [logger; running]
 

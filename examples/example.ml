@@ -29,21 +29,19 @@ let rec test_publish () =
   loop ()
 
 let create_consumer ~mode chan_name handler =
-  let dc = Consumer.default_config () in
-  let config = Consumer.{dc with max_in_flight = 100;} in
+  let config = Consumer.create_config ~max_in_flight:100 () |> Result.ok_or_failwith in
   let address =
     match mode with
     | Consumer.ModeNsqd -> nsqd_address
     | Consumer.ModeLookupd -> lookupd_address
   in
-  Result.ok_or_failwith
-    (Consumer.create 
-       ~mode
-       ~config
-       [(Host address)]
-       (Topic "Test") 
-       (Channel chan_name)
-       handler)
+  Consumer.create 
+    ~mode
+    ~config
+    [(Host address)]
+    (Topic "Test") 
+    (Channel chan_name)
+    handler
 
 let setup_logging level =
   Logs.set_level level;

@@ -6,7 +6,6 @@ let default_backoff_seconds = 1.0
 let max_backoff_seconds = 3600.0
 let default_nsqd_port = 4150
 let default_lookupd_port = 4161
-let default_lookupd_poll_seconds = 60.
 let network_buffer_size = 16 * 1024
 let recalculate_rdy_interval = 60.0
 
@@ -103,8 +102,21 @@ module Address = struct
     | HostPort (a, p) -> Printf.sprintf "%s:%d" a p
 end
 
+module IdentifyConfig = struct
+  (* This will be encoded to JSON and sent with the IDENTIFY command *)
+  type t = {
+    heartbeat_interval : int; (* In milliseconds  *)
+    client_id : string;
+    hostname : string;
+    user_agent : string;
+    output_buffer_size : int; (* buffer size on bytes the server should use  *)
+    output_buffer_timeout : int;
+    sample_rate : int;
+  } [@@deriving yojson { strict = false }]
+end
+
 type command =
-  (* TODO: Identify *)
+  | IDENTIFY of IdentifyConfig.t
   | Magic
   | SUB of Topic.t * Channel.t
   | PUB of Topic.t * Bytes.t
@@ -117,16 +129,29 @@ type command =
   | CLS
   | NOP
 
-type server_message =
-  | ResponseOk
-  | Heartbeat
-  | ErrorInvalid of string
-  | ErrorBadTopic of string
-  | ErrorBadChannel of string
-  | ErrorFINFailed of string
-  | ErrorREQFailed of string
-  | ErrorTOUCHFailed of string
-  | Message of raw_message
+module ServerMessage = struct
+  type t =
+    | ResponseOk
+    | Heartbeat
+    | ErrorInvalid of string
+    | ErrorBadTopic of string
+    | ErrorBadChannel of string
+    | ErrorFINFailed of string
+    | ErrorREQFailed of string
+    | ErrorTOUCHFailed of string
+    | Message of raw_message
+
+  let to_string = function
+    | ResponseOk -> "OK"
+    | Heartbeat -> "Heartbeat"
+    | ErrorInvalid s -> Printf.sprintf "ErrorInvalid: %s" s
+    | ErrorBadTopic s -> Printf.sprintf "ErrorBadTopic: %s" s
+    | ErrorBadChannel s -> Printf.sprintf "ErrorBadChannel: %s" s
+    | ErrorFINFailed s -> Printf.sprintf "ErrorFINFailed: %s" s
+    | ErrorREQFailed s -> Printf.sprintf "ErrorREQFailed: %s" s
+    | ErrorTOUCHFailed s -> Printf.sprintf "ErrTouchFailed: %s" s
+    | Message m -> Printf.sprintf "Message with ID %s" (MessageID.to_string m.id)
+end
 
 type handler_result =
   | HandlerOK
@@ -152,7 +177,7 @@ let producer_addresses lr =
 let guard_str f =
   match Result.try_with f with
   | Ok _ as x -> x
-  | Error e -> Result.Error (Exn.to_string e)
+  | Error e -> Error (Exn.to_string e)
 
 let lookup_response_from_string s =
   let open Result in
@@ -161,8 +186,8 @@ let lookup_response_from_string s =
 
 let log_and_return prefix r =
   match r with
-  | Result.Ok _ as ok -> return ok
-  | Result.Error s as error ->
+  | Ok _ as ok -> return ok
+  | Error s as error ->
     Logs_lwt.err (fun l -> l "%s: %s" prefix s) >>= fun () ->
     return error
 
@@ -196,8 +221,7 @@ let query_nsqlookupd ~topic a =
     begin
       fun e ->
         let s = Exn.to_string e in
-        Logs_lwt.err (fun l -> l "Querying lookupd `%s`: %s" (Address.to_string a) s) >>= fun () ->
-        return_error s
+        log_and_return "Querying lookupd" (Error s)
     end
 
 let bytes_of_pub topic data =
@@ -232,8 +256,21 @@ let bytes_of_mpub topic bodies =
   Printf.sprintf "MPUB %s\n%s" (Topic.to_string topic) (Bytes.to_string buf)
   |> Bytes.of_string
 
+(**
+   IDENTIFY\n
+   [ 4-byte size in bytes ][ N-byte JSON data ]
+*)
+let bytes_of_identify c =
+  let buf = Bytes.create 4 in
+  let data = IdentifyConfig.to_yojson c |> Yojson.Safe.to_string in
+  let length = String.length data in
+  EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int_exn length);
+  Printf.sprintf "IDENTIFY\n%s%s" (Bytes.to_string buf) data
+  |> Bytes.of_string
+
 let bytes_of_command = function
   | Magic -> Bytes.of_string "  V2" 
+  | IDENTIFY c -> bytes_of_identify c
   | NOP -> Bytes.of_string "NOP\n"
   | RDY i -> Printf.sprintf "RDY %i\n" i |> Bytes.of_string
   | FIN id -> Printf.sprintf "FIN %s\n" (MessageID.to_string id) |> Bytes.of_string
@@ -251,13 +288,13 @@ let bytes_of_command = function
     |> Bytes.of_string
 
 (* Timeout will only apply if > 0.0 *)
-let maybe_timeout ?timeout f =
-  match timeout with
-  | None -> f ()
-  | Some t when Float.(t <= 0.0) -> f ()
-  | Some t -> Lwt_unix.with_timeout t f
+let maybe_timeout ~timeout f =
+  if Float.(timeout <= 0.0)
+  then f ()
+  else Lwt_unix.with_timeout timeout f
 
-let send command (_, oc) timeout =
+let send ~timeout ~conn command =
+  let oc = snd conn in
   let data = bytes_of_command command |> Bytes.to_string in
   maybe_timeout ~timeout (fun () -> Lwt_io.write oc data)
 
@@ -294,19 +331,20 @@ let frame_from_bytes bytes =
   let data = Bytes.sub bytes 4 to_read in
   {frame_type; data}
 
-let read_raw_frame (ic, _) =
+let read_raw_frame ~timeout (ic, _) =
   Lwt_io.BE.read_int32 ic >>= fun size ->
   let size = Int32.to_int_exn size in
   let bytes = Bytes.create size in
-  Lwt_io.read_into_exactly ic bytes 0 size >|= fun () ->
-  frame_from_bytes bytes
+  maybe_timeout ~timeout (fun () -> Lwt_io.read_into_exactly ic bytes 0 size) >>= fun () ->
+  return (frame_from_bytes bytes)
 
 let parse_response_body body =
   let body = Bytes.to_string body in
+  let open ServerMessage in
   match body with
-  | "OK" -> Result.Ok ResponseOk
-  | "_heartbeat_" -> Result.Ok Heartbeat
-  | _ -> Result.Error (Printf.sprintf "Unknown response: %s" body)
+  | "OK" -> Ok ResponseOk
+  | "_heartbeat_" -> Ok Heartbeat
+  | _ -> Error (Printf.sprintf "Unknown response: %s" body)
 
 let parse_message_body_exn body =
   let timestamp = EndianBytes.BigEndian.get_int64 body 0 in
@@ -314,7 +352,7 @@ let parse_message_body_exn body =
   let length = Bytes.length body in
   let id = MessageID.of_bytes (Bytes.sub body 10 16) in
   let body = Bytes.sub body 26 (length-26) in
-  Message { timestamp; attempts; id; body; }
+  ServerMessage.Message { timestamp; attempts; id; body; }
 
 let parse_message_body body =
   guard_str @@ fun () -> parse_message_body_exn body
@@ -323,14 +361,15 @@ let parse_error_body body =
   match String.split ~on:' ' (Bytes.to_string body) with
   | [code; detail] ->
     begin 
+      let open ServerMessage in
       match code with 
       | "E_INVALID" -> Result.return @@ ErrorInvalid detail
       | "E_BAD_TOPIC" -> Result.return @@ ErrorBadTopic detail
       | "E_BAD_CHANNEL" -> Result.return @@ ErrorBadChannel detail
       | "E_FIN_FAILED" -> Result.return @@ ErrorFINFailed detail
-      | _ -> Result.Error (Printf.sprintf "Unknown error code: %s. %s" code detail)
+      | _ -> Error (Printf.sprintf "Unknown error code: %s. %s" code detail)
     end
-  | _ -> Result.Error (Printf.sprintf "Malformed error code: %s" (Bytes.to_string body))
+  | _ -> Error (Printf.sprintf "Malformed error code: %s" (Bytes.to_string body))
 
 let server_message_of_frame raw =
   match (FrameType.of_int32 raw.frame_type) with
@@ -339,24 +378,31 @@ let server_message_of_frame raw =
   | FrameError -> parse_error_body raw.data
   | FrameUnknown i -> Result.Error (Printf.sprintf "Unknown frame type: %li" i)
 
-let subscribe topic channel conn timeout =
-  send (SUB (topic, channel)) conn timeout >>= fun () ->
-  read_raw_frame conn >>= fun raw ->
+let send_expect_ok ~read_timeout ~write_timeout ~conn cmd =
+  send ~timeout:write_timeout ~conn cmd >>= fun () ->
+  read_raw_frame ~timeout:read_timeout conn >>= fun raw ->
   match server_message_of_frame raw with
-  | Result.Ok ResponseOk -> return_unit
-  | _ -> fail_with "Unexpected SUB response"
+  | Ok ResponseOk -> return_unit
+  | Ok sm -> fail_with @@ Printf.sprintf "Expected OK, got %s" (ServerMessage.to_string sm)
+  | Error e -> fail_with (Printf.sprintf "Expected OK, got %s" e)
 
-let requeue_delay attempts =
-  let d = Milliseconds.value default_requeue_delay in
-  let attempts = Int64.of_int_exn attempts in
-  Milliseconds.of_int64 Int64.(d * attempts)
+let subscribe ~read_timeout ~write_timeout ~conn topic channel =
+  send_expect_ok ~read_timeout ~write_timeout ~conn (SUB (topic, channel))
+
+let identify ~read_timeout ~write_timeout ~conn ic =
+  send_expect_ok ~read_timeout ~write_timeout ~conn (IDENTIFY ic)
 
 let handle_message handler msg max_attempts =
+  let requeue_delay attempts =
+    let d = Milliseconds.value default_requeue_delay in
+    let attempts = Int64.of_int_exn attempts in
+    Milliseconds.of_int64 Int64.(d * attempts)
+  in
   catch_result1 handler msg.body >>=
   begin
     function
-    | Result.Ok r -> return r
-    | Result.Error e ->
+    | Ok r -> return r
+    | Error e ->
       Logs_lwt.err (fun l -> l "Handler error: %s" (Exn.to_string e)) >>= fun () ->
       return HandlerRequeue
   end
@@ -366,17 +412,18 @@ let handle_message handler msg max_attempts =
     let attempts = Unsigned.UInt16.to_int msg.attempts in
     if attempts >= max_attempts
     then 
-      (Logs_lwt.warn (fun l -> l "Discarding message as reached max attempts, %d" attempts) >>= fun () ->
+      (Logs_lwt.warn (fun l -> l "Discarding message %s as reached max attempts, %d" (MessageID.to_string msg.id) attempts) >>= fun () ->
        return (FIN msg.id))
     else
       let delay = requeue_delay attempts in
       return (REQ (msg.id, delay))
 
-let handle_frame frame handler max_attempts =
+let handle_server_message server_message handler max_attempts =
   let warn_return_none name msg = 
     Logs_lwt.warn (fun l -> l "%s: %s" name msg) >>= fun () -> return_none 
   in
-  match frame with
+  let open ServerMessage in
+  match server_message with
   | ResponseOk -> return_none
   | Heartbeat -> Logs_lwt.debug (fun l -> l "Received heartbeat") >>= fun () -> return_some NOP
   | ErrorInvalid s ->  warn_return_none "ErrorInvalid" s
@@ -388,6 +435,37 @@ let handle_frame frame handler max_attempts =
   | Message msg -> handle_message handler msg max_attempts >>= fun cmd -> return_some cmd
 
 module Consumer = struct
+
+  module VInt = struct 
+    let validate_positive value name c =
+      if Int.is_positive value
+      then Ok c
+      else Error (Printf.sprintf "%s must be greater than 0" name)
+
+    let validate_between ~low ~high value name c =
+      if Int.between ~low ~high value
+      then Ok c
+      else Error (Printf.sprintf "%s must be between %s and %s, got %s" name (Int.to_string low) (Int.to_string high) (Int.to_string value))
+  end
+
+  module VFloat = struct 
+    let validate_positive value name c =
+      if Float.is_positive value
+      then Ok c
+      else Error (Printf.sprintf "%s must be greater than 0" name)
+
+    let validate_between ~low ~high value name c =
+      if Float.between ~low ~high value
+      then Ok c
+      else Error (Printf.sprintf "%s must be between %s and %s, got %s" name (Float.to_string low) (Float.to_string high) (Float.to_string value))
+  end
+
+
+  let validate_not_blank s name c =
+    if String.is_empty s
+    then Error (Printf.sprintf "%s can't be blank" name)
+    else Ok c
+
   type config = {
     (* The total number of messages allowed in flight for all connections of this consumer *)
     max_in_flight : int;
@@ -398,40 +476,92 @@ module Consumer = struct
     dial_timeout : float;
     read_timeout : float;
     write_timeout : float;
+    lookupd_poll_interval : float;
+    lookupd_poll_jitter : float;
+    max_requeue_delay : float;
+    default_requeue_delay : float;
+
+    (* The fields below are used in IdentifyConfig.t *)
+    heartbeat_interval : float;
+    client_id : string;
+    hostname : string;
+    user_agent : string;
+    output_buffer_size : int; (* buffer size on bytes the server should use  *)
+    output_buffer_timeout : float;
+    sample_rate : int; (* Between 0 and 99 *)
   }
-
-  let validate_positive c value name =
-    if value > 0
-    then Result.Ok c
-    else Result.Error (Printf.sprintf "%s must be greater than 0" name)
-
-  let validate_between min max value name c =
-    if value >= min && value <= max
-    then Result.Ok c
-    else Result.Error (Printf.sprintf "%s must be between %d and %d, got %d" name min max value)
-
-  let max_in_flight_positive c =
-    validate_positive c c.max_in_flight "max_in_flight"
-
-  let max_attempts_between min max c =
-    validate_between min max c.max_attempts "max_attempts" c
 
   let validate_config c =
     let open Result in
-    max_in_flight_positive c
-    >>= max_attempts_between 0 65535
+    VInt.validate_positive c.max_in_flight "max_in_flight" c
+    >>= VInt.validate_between ~low:0 ~high:65535 c.max_attempts "max_attempts"
+    >>= VFloat.validate_positive c.backoff_multiplier "backoff_multiplier"
+    >>= VFloat.validate_between ~low:0.0 ~high:300.0 c.dial_timeout "dial_timeout"
+    >>= VFloat.validate_between ~low:0.1 ~high:300.0 c.read_timeout "read_timeout"
+    >>= VFloat.validate_between ~low:0.1 ~high:300.0 c.write_timeout "write_timeout"
+    >>= VFloat.validate_between ~low:0.1 ~high:300.0 c.lookupd_poll_interval "lookupd_poll_interval"
+    >>= VFloat.validate_between ~low:0.0 ~high:1.0 c.lookupd_poll_jitter "lookupd_poll_jitter"
+    >>= VFloat.validate_between ~low:0.0 ~high:(3600.) c.default_requeue_delay "default_requeue_delay"
+    >>= VFloat.validate_between ~low:0.0 ~high:(3600.) c.max_requeue_delay "max_requeue_delay"
+    >>= VFloat.validate_between ~low:0.01 ~high:300.0 c.output_buffer_timeout "output_buffer_timeout"
+    >>= VInt.validate_between ~low:64 ~high:(5 * 1025 * 1000) c.output_buffer_size "output_buffer_size"
+    >>= VInt.validate_between ~low:0 ~high:99 c.sample_rate "sample_rate"
+    >>= VFloat.validate_between ~low:1.0 ~high:300.0 c.heartbeat_interval "heartbeat_interval"
+    >>= validate_not_blank c.client_id "client_id"
+    >>= validate_not_blank c.hostname "hostname"
+    >>= validate_not_blank c.user_agent "user_agent"
 
-  let default_config_value = {
-    max_in_flight = 1;
-    max_attempts = 5;
-    backoff_multiplier = 0.5;
-    dial_timeout = 1.0;
-    read_timeout = 60.0;
-    write_timeout = 1.0;
-  }
+  let create_config 
+      ?(max_in_flight=1) 
+      ?(max_attempts=5)
+      ?(backoff_multiplier=0.5)
+      ?(dial_timeout=1.0)
+      ?(read_timeout = 60.0)
+      ?(write_timeout = 1.0)
+      ?(lookupd_poll_interval = 60.0)
+      ?(lookupd_poll_jitter = 0.3)
+      ?(heartbeat_interval = 60.0)
+      ?(max_requeue_delay = (15.0 *. 60.0))
+      ?(default_requeue_delay = 90.0)
+      ?(client_id = (Unix.gethostname ()))
+      ?(hostname = (Unix.gethostname ()))
+      ?(user_agent = "nsq-ocaml/0.2")
+      ?(output_buffer_size = 16 * 1024)
+      ?(output_buffer_timeout = 0.25)
+      ?(sample_rate = 0)
+      ()
+    = 
+    validate_config {
+      max_in_flight;
+      max_attempts;
+      backoff_multiplier;
+      dial_timeout;
+      read_timeout;
+      write_timeout;
+      lookupd_poll_interval;
+      lookupd_poll_jitter;
+      max_requeue_delay;
+      default_requeue_delay;
+      heartbeat_interval;
+      client_id;
+      hostname;
+      user_agent;
+      output_buffer_size;
+      output_buffer_timeout;
+      sample_rate;
+    }
 
-  let default_config () =
-    default_config_value
+  let extract_identify_config c = 
+    let to_ms f = Float.to_int (f *. 1000.0) in
+    {
+      IdentifyConfig.heartbeat_interval = to_ms c.heartbeat_interval;
+      IdentifyConfig.client_id = c.client_id;
+      IdentifyConfig.hostname = c.hostname;
+      IdentifyConfig.user_agent = c.user_agent;
+      IdentifyConfig.output_buffer_size = c.output_buffer_size;
+      IdentifyConfig.output_buffer_timeout = to_ms c.output_buffer_timeout;
+      IdentifyConfig.sample_rate = c.sample_rate;
+    }
 
   type breaker_position =
     | Closed
@@ -463,20 +593,22 @@ module Consumer = struct
     log_prefix : string;
   }
 
-  let create ?(mode=ModeNsqd) ?(config=default_config_value) addresses topic channel handler =
-    match validate_config config with
-    | Result.Error s -> Result.Error (Printf.sprintf "Invalid config: %s" s)
-    | Result.Ok config ->
-      Result.return { 
-        addresses;
-        nsqd_connections = 0;
-        topic; 
-        channel; 
-        handler;
-        config;
-        mode;
-        log_prefix = Printf.sprintf "%s/%s" (Topic.to_string topic) (Channel.to_string channel);
-      }
+  let create ?(mode=ModeNsqd) ?config addresses topic channel handler =
+    let config = match config with
+      (* We're assuming create_config with defaults always returns valid config *)
+      | None -> create_config () |> Result.ok_or_failwith
+      | Some c -> c
+    in
+    { 
+      addresses;
+      nsqd_connections = 0;
+      topic; 
+      channel; 
+      handler;
+      config;
+      mode;
+      log_prefix = Printf.sprintf "%s/%s" (Topic.to_string topic) (Channel.to_string channel);
+    }
 
   let rdy_per_connection c =
     if c.nsqd_connections = 0 || (c.config.max_in_flight < c.nsqd_connections)
@@ -494,20 +626,20 @@ module Consumer = struct
     | ConnectionError of exn
     | RecalcRDY
 
-  let rec read_loop conn mbox =
+  let rec read_loop ~timeout conn mbox =
     let put_async m = Lwt.async @@ fun () -> Lwt_mvar.put mbox m in
-    catch_result1 read_raw_frame conn >>= function
-    | Result.Ok raw ->
+    catch_result1 (read_raw_frame ~timeout) conn >>= function
+    | Ok raw ->
       put_async @@ RawFrame raw;
-      read_loop conn mbox
-    | Result.Error e ->
+      read_loop ~timeout conn mbox
+    | Error e ->
       put_async @@ ConnectionError e;
       return_unit
 
   let open_breaker c conn mbox bs =
     (* Send RDY 0 and send retry trial command after a delay  *)
     Logs_lwt.debug (fun l -> l "Breaker open, sending RDY 0") >>= fun () ->
-    send (RDY 0) conn c.config.dial_timeout >|= fun () ->
+    send ~timeout:c.config.dial_timeout ~conn (RDY 0) >|= fun () ->
     let bs = { error_count = bs.error_count + 1; position = Open } in
     let duration = backoff_duration c.config.backoff_multiplier bs.error_count in
     async (fun () -> do_after duration (fun () -> Lwt_mvar.put mbox TrialBreaker));
@@ -534,37 +666,38 @@ module Consumer = struct
         (* Passed test  *)
         let rdy = rdy_per_connection c in
         Logs_lwt.debug (fun l -> l "%s Trial passed, sending RDY %d" c.log_prefix rdy) >>= fun () ->
-        send (RDY rdy) conn c.config.write_timeout >>= fun () ->
+        send ~timeout:c.config.write_timeout ~conn (RDY rdy) >>= fun () ->
         return { position = Closed; error_count = 0; }
 
   let consume c conn mbox =
     let open_breaker = open_breaker c conn mbox in
     let update_breaker_state = update_breaker_state c conn open_breaker in
+    let send = send ~timeout:c.config.write_timeout ~conn in
     let rec mbox_loop bs =
       Lwt_mvar.take mbox >>= function
       | RawFrame raw ->
         begin 
           match server_message_of_frame raw with
-          | Result.Ok frame ->
+          | Ok server_message ->
             Lwt.async 
               begin
                 fun () -> 
-                  handle_frame frame c.handler c.config.max_attempts >>= function
+                  handle_server_message server_message c.handler c.config.max_attempts >>= function
                   | Some c -> Lwt_mvar.put mbox (Command c)
                   | None -> return_unit
               end;
             mbox_loop bs
-          | Result.Error s -> 
+          | Error s -> 
             Logs_lwt.err (fun l -> l "%s Error parsing response: %s" c.log_prefix s) >>= fun () ->
             mbox_loop bs
         end
       | Command cmd ->
-        send cmd conn c.config.write_timeout >>= fun () ->
+        send cmd >>= fun () ->
         update_breaker_state cmd bs >>= mbox_loop
       | TrialBreaker ->
         Logs_lwt.debug (fun l -> l "%s Breaker trial, sending RDY 1 (Error count: %i)" c.log_prefix  bs.error_count) >>= fun () ->
         let bs = { bs with position = HalfOpen } in
-        send (RDY 1) conn c.config.write_timeout >>=  fun () ->
+        send (RDY 1) >>=  fun () ->
         mbox_loop bs
       | ConnectionError e ->
         fail e 
@@ -576,22 +709,24 @@ module Consumer = struct
         | Closed -> 
           let rdy = rdy_per_connection c in
           Logs_lwt.debug (fun l -> l "%s Sending recalculated RDY %d" c.log_prefix rdy) >>= fun () ->
-          send (RDY rdy) conn c.config.write_timeout >>= fun () ->
+          send (RDY rdy) >>= fun () ->
           mbox_loop bs
     in
-    send Magic conn c.config.write_timeout >>= fun () ->
-    subscribe c.topic c.channel conn c.config.dial_timeout >>= fun () ->
+    send Magic >>= fun () ->
+    let ic = extract_identify_config c.config in
+    identify ~read_timeout:c.config.read_timeout ~write_timeout:c.config.write_timeout ~conn ic >>= fun () ->
+    subscribe ~read_timeout:c.config.read_timeout ~write_timeout:c.config.write_timeout ~conn c.topic c.channel >>= fun () ->
     (* Start cautiously by sending RDY 1 *) 
     Logs_lwt.debug (fun l -> l "%s Sending initial RDY 1" c.log_prefix) >>= fun () ->
-    send (RDY 1) conn c.config.write_timeout >>= fun () ->
+    send (RDY 1) >>= fun () ->
     (* Start background reader *)
-    Lwt.async (fun () -> read_loop conn mbox);
+    Lwt.async (fun () -> read_loop ~timeout:c.config.read_timeout conn mbox);
     let initial_state = { position = HalfOpen; error_count = 0; } in
     mbox_loop initial_state
 
   let rec main_loop c address mbox =
     catch_result (fun () -> connect address c.config.dial_timeout) >>= function
-    | Result.Ok conn ->
+    | Ok conn ->
       let handle_ex e = 
         Lwt.join [
           Logs_lwt.err (fun l -> l "Consumer connection error: %s" (Exn.to_string e));
@@ -606,7 +741,7 @@ module Consumer = struct
       c.nsqd_connections <- (max 0 (c.nsqd_connections - 1));
       Logs_lwt.debug ( fun l -> l "%s %d connections" c.log_prefix c.nsqd_connections) >>= fun () ->
       main_loop c address mbox
-    | Result.Error e ->
+    | Error e ->
       Logs_lwt.err (fun l -> l "%s Connecting to consumer '%s': %s" c.log_prefix (Address.to_string address) (Exn.to_string e)) >>= fun () ->
       Lwt_unix.sleep default_backoff_seconds >>= fun () ->
       main_loop c address mbox
@@ -639,6 +774,7 @@ module Consumer = struct
     main_loop c address mbox
 
   let start_polling_lookupd c lookup_addresses =
+    let poll_interval = Float.((1.0 + (Random.float c.config.lookupd_poll_jitter)) * c.config.lookupd_poll_interval) in
     let rec check_for_producers running =
       Logs_lwt.debug (fun l -> l "Querying %d lookupd hosts" (List.length lookup_addresses)) >>= fun () ->
       Lwt_list.map_p (query_nsqlookupd ~topic:c.topic) lookup_addresses >>= fun results ->
@@ -658,7 +794,7 @@ module Consumer = struct
           ) 
         new_producers;
       let running = Set.union running new_producers in
-      Lwt_unix.sleep default_lookupd_poll_seconds >>= fun () ->
+      Lwt_unix.sleep poll_interval >>= fun () ->
       check_for_producers running
     in
     check_for_producers (Set.empty (module Address))
@@ -689,6 +825,7 @@ module Producer = struct
   let default_pool_size = 5
   let default_dial_timeout = 15.0
   let default_write_timeout = 15.0
+  let default_read_timeout = 15.0
 
   (** Throw away connections that are idle for this long
        Note that NSQ expects hearbeats to be answered every 30 seconds
@@ -712,30 +849,30 @@ module Producer = struct
       begin
         fun () -> 
           connect address default_dial_timeout >>= fun conn ->
-          send Magic conn default_write_timeout >>= fun () ->
+          send ~timeout:default_write_timeout ~conn Magic >>= fun () ->
           let last_send = ref (Unix.time ()) in
           return { conn; last_send }
       end
 
   let create ?(pool_size=default_pool_size) address = 
     if pool_size <= 0
-    then Result.Error "Pool size must be >= 1"
-    else Result.Ok { address; pool = create_pool address pool_size }
+    then Error "Pool size must be >= 1"
+    else Ok { address; pool = create_pool address pool_size }
 
   let publish_cmd t cmd =
     let with_conn c =
       let rec read_until_ok () =
-        read_raw_frame c.conn >>= fun frame ->
+        read_raw_frame ~timeout:default_read_timeout c.conn >>= fun frame ->
         match server_message_of_frame frame with
-        | Result.Ok ResponseOk -> return_ok ()
-        | Result.Ok Heartbeat -> 
-          send NOP c.conn default_write_timeout >>= fun () ->
+        | Ok ResponseOk -> return_ok ()
+        | Ok Heartbeat -> 
+          send ~timeout:default_write_timeout ~conn:c.conn  NOP >>= fun () ->
           c.last_send := Unix.time ();
           read_until_ok ()
-        | Result.Ok _ -> return_error "Expected OK or Heartbeat, got another message"
-        | Result.Error e -> return_error (Printf.sprintf "Received error: %s" e)
+        | Ok _ -> return_error "Expected OK or Heartbeat, got another message"
+        | Error e -> return_error (Printf.sprintf "Received error: %s" e)
       in
-      send cmd c.conn default_write_timeout >>= fun () ->
+      send ~timeout:default_write_timeout ~conn:c.conn cmd >>= fun () ->
       c.last_send := Unix.time ();
       read_until_ok ()
     in
