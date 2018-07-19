@@ -10,7 +10,7 @@ let start = ref (Unix.gettimeofday ())
 let published = ref 0
 let concurrency = 5
 
-let rec publish p =
+let publish p =
   let rec loop () =
     let msg = Int.to_string !published |> Bytes.of_string in
     Producer.publish p (Topic "Test") msg >>= function
@@ -49,7 +49,7 @@ let setup_logging level =
 let () = 
   setup_logging Lwt_log.Debug;
   let p = Result.ok_or_failwith @@ Producer.create ~pool_size:concurrency (Host nsqd_address) in
-  let publishers = List.init concurrency (fun _ -> publish p) in
+  let publishers = List.init ~f:(fun _ -> publish p) concurrency in
   start := Unix.gettimeofday ();
   Lwt_main.run @@ join ((rate_logger ()) :: publishers)
 

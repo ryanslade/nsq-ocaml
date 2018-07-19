@@ -1,8 +1,6 @@
-JBUILDER ?= jbuilder
-
-example: 
-	$(JBUILDER) build @install
+build: 
+	dune build --profile release
 
 clean:
-	$(JBUILDER) clean
+	dune clean
 

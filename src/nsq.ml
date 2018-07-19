@@ -250,7 +250,7 @@ let bytes_of_mpub topic bodies =
     fun b -> 
       EndianBytes.BigEndian.set_int32 buf !index (Int32.of_int_exn @@ Bytes.length b);
       index := !index + 4;
-      Bytes.blit b 0 buf !index (Bytes.length b);
+      Bytes.blit ~src:b ~src_pos:0 ~dst:buf ~dst_pos:!index ~len:(Bytes.length b);
       index := !index + Bytes.length b;
   ) bodies;
   Printf.sprintf "MPUB %s\n%s" (Topic.to_string topic) (Bytes.to_string buf)
@@ -328,7 +328,7 @@ let connect host timeout =
 let frame_from_bytes bytes =
   let frame_type = EndianBytes.BigEndian.get_int32 bytes 0 in
   let to_read = (Bytes.length bytes) - 4 in
-  let data = Bytes.sub bytes 4 to_read in
+  let data = Bytes.sub ~pos:4 ~len:to_read bytes in
   {frame_type; data}
 
 let read_raw_frame ~timeout (ic, _) =
@@ -350,8 +350,8 @@ let parse_message_body_exn body =
   let timestamp = EndianBytes.BigEndian.get_int64 body 0 in
   let attempts = EndianBytes.BigEndian.get_uint16 body 8 |> Unsigned.UInt16.of_int in
   let length = Bytes.length body in
-  let id = MessageID.of_bytes (Bytes.sub body 10 16) in
-  let body = Bytes.sub body 26 (length-26) in
+  let id = MessageID.of_bytes (Bytes.sub ~pos:10 ~len:16 body) in
+  let body = Bytes.sub ~pos:26 ~len:(length-26) body in
   ServerMessage.Message { timestamp; attempts; id; body; }
 
 let parse_message_body body =
@@ -371,7 +371,7 @@ let parse_error_body body =
     end
   | _ -> Error (Printf.sprintf "Malformed error code: %s" (Bytes.to_string body))
 
-let server_message_of_frame raw =
+let server_message_of_raw_frame raw =
   match (FrameType.of_int32 raw.frame_type) with
   | FrameResponse -> parse_response_body raw.data
   | FrameMessage -> parse_message_body raw.data
@@ -381,7 +381,7 @@ let server_message_of_frame raw =
 let send_expect_ok ~read_timeout ~write_timeout ~conn cmd =
   send ~timeout:write_timeout ~conn cmd >>= fun () ->
   read_raw_frame ~timeout:read_timeout conn >>= fun raw ->
-  match server_message_of_frame raw with
+  match server_message_of_raw_frame raw with
   | Ok ResponseOk -> return_unit
   | Ok sm -> fail_with @@ Printf.sprintf "Expected OK, got %s" (ServerMessage.to_string sm)
   | Error e -> fail_with (Printf.sprintf "Expected OK, got %s" e)
@@ -445,7 +445,7 @@ module Consumer = struct
     let validate_between ~low ~high value name c =
       if Int.between ~low ~high value
       then Ok c
-      else Error (Printf.sprintf "%s must be between %s and %s, got %s" name (Int.to_string low) (Int.to_string high) (Int.to_string value))
+      else Error (Printf.sprintf "%s must be between %d and %d, got %d" name low high value)
   end
 
   module VFloat = struct 
@@ -457,7 +457,7 @@ module Consumer = struct
     let validate_between ~low ~high value name c =
       if Float.between ~low ~high value
       then Ok c
-      else Error (Printf.sprintf "%s must be between %s and %s, got %s" name (Float.to_string low) (Float.to_string high) (Float.to_string value))
+      else Error (Printf.sprintf "%s must be between %f and %f, got %f" name low high value)
   end
 
 
@@ -677,7 +677,7 @@ module Consumer = struct
       Lwt_mvar.take mbox >>= function
       | RawFrame raw ->
         begin 
-          match server_message_of_frame raw with
+          match server_message_of_raw_frame raw with
           | Ok server_message ->
             Lwt.async 
               begin
@@ -814,7 +814,7 @@ end
 module Producer = struct
   type connection = {
     conn : (Lwt_io.input Lwt_io.channel * Lwt_io.output Lwt_io.channel);
-    last_send : float ref
+    last_write : float ref
   }
 
   type t = { 
@@ -836,7 +836,7 @@ module Producer = struct
   let create_pool address size =
     let validate c =
       let now = Unix.time () in
-      let diff = now -. !(c.last_send) in
+      let diff = now -. !(c.last_write) in
       return (Float.(diff < ttl_seconds))
     in
     (* Always return false so that we throw away connections where we encountered an error *)
@@ -850,8 +850,8 @@ module Producer = struct
         fun () -> 
           connect address default_dial_timeout >>= fun conn ->
           send ~timeout:default_write_timeout ~conn Magic >>= fun () ->
-          let last_send = ref (Unix.time ()) in
-          return { conn; last_send }
+          let last_write = ref (Unix.time ()) in
+          return { conn; last_write }
       end
 
   let create ?(pool_size=default_pool_size) address = 
@@ -863,17 +863,17 @@ module Producer = struct
     let with_conn c =
       let rec read_until_ok () =
         read_raw_frame ~timeout:default_read_timeout c.conn >>= fun frame ->
-        match server_message_of_frame frame with
+        match server_message_of_raw_frame frame with
         | Ok ResponseOk -> return_ok ()
         | Ok Heartbeat -> 
           send ~timeout:default_write_timeout ~conn:c.conn  NOP >>= fun () ->
-          c.last_send := Unix.time ();
+          c.last_write := Unix.time ();
           read_until_ok ()
         | Ok _ -> return_error "Expected OK or Heartbeat, got another message"
         | Error e -> return_error (Printf.sprintf "Received error: %s" e)
       in
       send ~timeout:default_write_timeout ~conn:c.conn cmd >>= fun () ->
-      c.last_send := Unix.time ();
+      c.last_write := Unix.time ();
       read_until_ok ()
     in
     let try_publish () = Lwt_pool.use t.pool with_conn in

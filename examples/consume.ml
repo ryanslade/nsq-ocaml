@@ -31,7 +31,7 @@ let setup_logging level =
       ();
   Lwt_log_core.add_rule "*" level
 
-let handler msg =
+let handler _ =
   consumed := !consumed + 1;
   return HandlerOK
 
