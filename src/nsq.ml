@@ -313,17 +313,14 @@ let connect host timeout =
     | Address.HostPort (h, p) -> (h, p)
   in
   Lwt_unix.gethostbyname host >>= fun info ->
-  try
-    let host = Array.get info.h_addr_list 0 in
-    let addr = Unix.ADDR_INET(host, port) in
-    maybe_timeout ~timeout (fun () ->
-        Lwt_io.open_connection
-          ~in_buffer:(Lwt_bytes.create network_buffer_size)
-          ~out_buffer:(Lwt_bytes.create network_buffer_size)
-          addr
-      )
-  with
-    _ -> fail_with "Host lookup failed"
+  let host = Array.random_element_exn info.h_addr_list in
+  let addr = Unix.ADDR_INET(host, port) in
+  maybe_timeout ~timeout (fun () ->
+      Lwt_io.open_connection
+        ~in_buffer:(Lwt_bytes.create network_buffer_size)
+        ~out_buffer:(Lwt_bytes.create network_buffer_size)
+        addr
+    )
 
 let frame_from_bytes bytes =
   let frame_type = EndianBytes.BigEndian.get_int32 bytes 0 in
@@ -776,26 +773,36 @@ module Consumer = struct
   let start_polling_lookupd c lookup_addresses =
     let poll_interval = Float.((1.0 + (Random.float c.config.lookupd_poll_jitter)) * c.config.lookupd_poll_interval) in
     let rec check_for_producers running =
-      Logs_lwt.debug (fun l -> l "Querying %d lookupd hosts" (List.length lookup_addresses)) >>= fun () ->
-      Lwt_list.map_p (query_nsqlookupd ~topic:c.topic) lookup_addresses >>= fun results ->
-      let discovered_producers =
-        List.filter_map ~f:Result.ok results
-        |> List.map ~f:producer_addresses
-        |> List.join
-        |> Set.of_list (module Address)
-      in
-      let new_producers = Set.diff discovered_producers running in
-      Logs_lwt.debug (fun l -> l "Found %d new producers" (Set.length new_producers)) >>= fun () ->
-      Set.iter 
-        ~f:(fun a -> 
-            async (fun () -> 
-                Logs_lwt.debug (fun l -> l "Starting consumer for: %s" (Address.to_string a)) >>= fun () ->
-                start_nsqd_consumer c a)
-          ) 
-        new_producers;
-      let running = Set.union running new_producers in
-      Lwt_unix.sleep poll_interval >>= fun () ->
-      check_for_producers running
+      catch
+        begin
+          fun () ->
+            Logs_lwt.debug (fun l -> l "Querying %d lookupd hosts" (List.length lookup_addresses)) >>= fun () ->
+            Lwt_list.map_p (query_nsqlookupd ~topic:c.topic) lookup_addresses >>= fun results ->
+            let discovered_producers =
+              List.filter_map ~f:Result.ok results
+              |> List.map ~f:producer_addresses
+              |> List.join
+              |> Set.of_list (module Address)
+            in
+            let new_producers = Set.diff discovered_producers running in
+            Logs_lwt.debug (fun l -> l "Found %d new producers" (Set.length new_producers)) >>= fun () ->
+            Set.iter
+              ~f:(
+                fun a ->
+                  async (fun () ->
+                      Logs_lwt.debug (fun l -> l "Starting consumer for: %s" (Address.to_string a)) >>= fun () ->
+                      start_nsqd_consumer c a)
+              )
+              new_producers;
+            let running = Set.union running new_producers in
+            Lwt_unix.sleep poll_interval >>= fun () ->
+            check_for_producers running
+        end
+        begin
+          fun e ->
+            Logs_lwt.err (fun l -> l "Error polling lookupd: %s" (Exn.to_string e)) >>= fun () ->
+            check_for_producers running
+        end
     in
     check_for_producers (Set.empty (module Address))
 
@@ -855,7 +862,7 @@ module Producer = struct
       end
 
   let create ?(pool_size=default_pool_size) address = 
-    if pool_size <= 0
+    if pool_size < 1
     then Error "Pool size must be >= 1"
     else Ok { address; pool = create_pool address pool_size }
 
@@ -866,7 +873,7 @@ module Producer = struct
         match server_message_of_raw_frame frame with
         | Ok ResponseOk -> return_ok ()
         | Ok Heartbeat -> 
-          send ~timeout:default_write_timeout ~conn:c.conn  NOP >>= fun () ->
+          send ~timeout:default_write_timeout ~conn:c.conn NOP >>= fun () ->
           c.last_write := Unix.time ();
           read_until_ok ()
         | Ok _ -> return_error "Expected OK or Heartbeat, got another message"
