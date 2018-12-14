@@ -117,7 +117,7 @@ end
 
 type command =
   | IDENTIFY of IdentifyConfig.t
-  | Magic
+  | MAGIC
   | SUB of Topic.t * Channel.t
   | PUB of Topic.t * Bytes.t
   | MPUB of Topic.t * Bytes.t list
@@ -310,7 +310,7 @@ let bytes_of_identify c =
   |> Bytes.of_string
 
 let bytes_of_command = function
-  | Magic -> Bytes.of_string "  V2" 
+  | MAGIC -> Bytes.of_string "  V2"
   | IDENTIFY c -> bytes_of_identify c
   | NOP -> Bytes.of_string "NOP\n"
   | RDY i -> Printf.sprintf "RDY %i\n" i |> Bytes.of_string
@@ -762,7 +762,7 @@ module Consumer = struct
           send (RDY rdy) >>= fun () ->
           mbox_loop bs
     in
-    send Magic >>= fun () ->
+    send MAGIC >>= fun () ->
     let ic = extract_identify_config c.config in
     identify ~read_timeout:c.config.read_timeout ~write_timeout:c.config.write_timeout ~conn ic >>= fun () ->
     subscribe ~read_timeout:c.config.read_timeout ~write_timeout:c.config.write_timeout ~conn c.topic c.channel >>= fun () ->
@@ -909,7 +909,7 @@ module Producer = struct
       begin
         fun () -> 
           connect address default_dial_timeout >>= fun conn ->
-          send ~timeout:default_write_timeout ~conn Magic >>= fun () ->
+          send ~timeout:default_write_timeout ~conn MAGIC >>= fun () ->
           let last_write = ref (Unix.time ()) in
           return { conn; last_write }
       end
