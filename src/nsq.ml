@@ -201,27 +201,29 @@ type handler_result =
   | HandlerOK
   | HandlerRequeue
 
-type lookup_producer = {
-  remote_address: string;
-  hostname: string;
-  broadcast_address: string;
-  tcp_port: int;
-  http_port: int;
-  version: string;
-} [@@deriving yojson { strict = false }]
+module Lookup = struct
+  type producer = {
+    remote_address: string;
+    hostname: string;
+    broadcast_address: string;
+    tcp_port: int;
+    http_port: int;
+    version: string;
+  } [@@deriving yojson { strict = false }]
 
-type lookup_response = {
-  channels: string list;
-  producers: lookup_producer list;
-} [@@deriving yojson { strict = false }]
+  type response = {
+    channels: string list;
+    producers: producer list;
+  } [@@deriving yojson { strict = false }]
 
-let producer_addresses lr =
-  List.map ~f:(fun p -> Address.host_port p.broadcast_address p.tcp_port) lr.producers
+  let response_of_string s =
+    let open Result in
+    try_with_string (fun () -> Yojson.Safe.from_string s) >>=
+    response_of_yojson
 
-let lookup_response_from_string s =
-  let open Result in
-  try_with_string (fun () -> Yojson.Safe.from_string s) >>=
-  lookup_response_of_yojson
+  let producer_addresses lr =
+    List.map ~f:(fun p -> Address.host_port p.broadcast_address p.tcp_port) lr.producers
+end
 
 let log_and_return prefix r =
   match r with
@@ -253,7 +255,7 @@ let query_nsqlookupd ~topic a =
         match Response.status resp with
         | `OK ->
           Cohttp_lwt.Body.to_string body >>= fun body ->
-          log_and_return "Error parsing lookup response" @@ lookup_response_from_string body
+          log_and_return "Error parsing lookup response" @@ Lookup.response_of_string body
         | status ->
           return_error (Printf.sprintf "Expected %s, got %s" (Code.string_of_status `OK) (Code.string_of_status status))
     end
@@ -831,7 +833,7 @@ module Consumer = struct
             Lwt_list.map_p (query_nsqlookupd ~topic:c.topic) lookup_addresses >>= fun results ->
             let discovered_producers =
               List.filter_map ~f:Result.ok results
-              |> List.map ~f:producer_addresses
+              |> List.map ~f:Lookup.producer_addresses
               |> List.join
               |> Set.of_list (module Address)
             in
