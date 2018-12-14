@@ -129,6 +129,11 @@ type command =
   | CLS
   | NOP
 
+let try_with_string f =
+  match Result.try_with f with
+  | Ok _ as x -> x
+  | Error e -> Error (Exn.to_string e)
+
 module ServerMessage = struct
   type t =
     | ResponseOk
@@ -151,6 +156,45 @@ module ServerMessage = struct
     | ErrorREQFailed s -> Printf.sprintf "ErrorREQFailed: %s" s
     | ErrorTOUCHFailed s -> Printf.sprintf "ErrTouchFailed: %s" s
     | Message m -> Printf.sprintf "Message with ID %s" (MessageID.to_string m.id)
+
+  let parse_response_body body =
+    let body = Bytes.to_string body in
+    match body with
+    | "OK" -> Ok ResponseOk
+    | "_heartbeat_" -> Ok Heartbeat
+    | _ -> Error (Printf.sprintf "Unknown response: %s" body)
+
+  let parse_message_body_exn body =
+    let timestamp = EndianBytes.BigEndian.get_int64 body 0 in
+    let attempts = EndianBytes.BigEndian.get_uint16 body 8 |> Unsigned.UInt16.of_int in
+    let length = Bytes.length body in
+    let id = MessageID.of_bytes (Bytes.sub ~pos:10 ~len:16 body) in
+    let body = Bytes.sub ~pos:26 ~len:(length-26) body in
+    Message { timestamp; attempts; id; body; }
+
+  let parse_message_body body =
+    try_with_string @@ fun () -> parse_message_body_exn body
+
+  let parse_error_body body =
+    match String.split ~on:' ' (Bytes.to_string body) with
+    | [code; detail] ->
+      begin 
+        match code with 
+        | "E_INVALID" -> Result.return @@ ErrorInvalid detail
+        | "E_BAD_TOPIC" -> Result.return @@ ErrorBadTopic detail
+        | "E_BAD_CHANNEL" -> Result.return @@ ErrorBadChannel detail
+        | "E_FIN_FAILED" -> Result.return @@ ErrorFINFailed detail
+        | _ -> Error (Printf.sprintf "Unknown error code: %s. %s" code detail)
+      end
+    | _ -> Error (Printf.sprintf "Malformed error code: %s" (Bytes.to_string body))
+
+  let of_raw_frame raw =
+    match (FrameType.of_int32 raw.frame_type) with
+    | FrameResponse -> parse_response_body raw.data
+    | FrameMessage -> parse_message_body raw.data
+    | FrameError -> parse_error_body raw.data
+    | FrameUnknown i -> Result.Error (Printf.sprintf "Unknown frame type: %li" i)
+
 end
 
 type handler_result =
@@ -174,14 +218,9 @@ type lookup_response = {
 let producer_addresses lr =
   List.map ~f:(fun p -> Address.host_port p.broadcast_address p.tcp_port) lr.producers
 
-let guard_str f =
-  match Result.try_with f with
-  | Ok _ as x -> x
-  | Error e -> Error (Exn.to_string e)
-
 let lookup_response_from_string s =
   let open Result in
-  guard_str (fun () -> Yojson.Safe.from_string s) >>=
+  try_with_string (fun () -> Yojson.Safe.from_string s) >>=
   lookup_response_of_yojson
 
 let log_and_return prefix r =
@@ -335,50 +374,10 @@ let read_raw_frame ~timeout (ic, _) =
   maybe_timeout ~timeout (fun () -> Lwt_io.read_into_exactly ic bytes 0 size) >>= fun () ->
   return (frame_from_bytes bytes)
 
-let parse_response_body body =
-  let body = Bytes.to_string body in
-  let open ServerMessage in
-  match body with
-  | "OK" -> Ok ResponseOk
-  | "_heartbeat_" -> Ok Heartbeat
-  | _ -> Error (Printf.sprintf "Unknown response: %s" body)
-
-let parse_message_body_exn body =
-  let timestamp = EndianBytes.BigEndian.get_int64 body 0 in
-  let attempts = EndianBytes.BigEndian.get_uint16 body 8 |> Unsigned.UInt16.of_int in
-  let length = Bytes.length body in
-  let id = MessageID.of_bytes (Bytes.sub ~pos:10 ~len:16 body) in
-  let body = Bytes.sub ~pos:26 ~len:(length-26) body in
-  ServerMessage.Message { timestamp; attempts; id; body; }
-
-let parse_message_body body =
-  guard_str @@ fun () -> parse_message_body_exn body
-
-let parse_error_body body =
-  match String.split ~on:' ' (Bytes.to_string body) with
-  | [code; detail] ->
-    begin 
-      let open ServerMessage in
-      match code with 
-      | "E_INVALID" -> Result.return @@ ErrorInvalid detail
-      | "E_BAD_TOPIC" -> Result.return @@ ErrorBadTopic detail
-      | "E_BAD_CHANNEL" -> Result.return @@ ErrorBadChannel detail
-      | "E_FIN_FAILED" -> Result.return @@ ErrorFINFailed detail
-      | _ -> Error (Printf.sprintf "Unknown error code: %s. %s" code detail)
-    end
-  | _ -> Error (Printf.sprintf "Malformed error code: %s" (Bytes.to_string body))
-
-let server_message_of_raw_frame raw =
-  match (FrameType.of_int32 raw.frame_type) with
-  | FrameResponse -> parse_response_body raw.data
-  | FrameMessage -> parse_message_body raw.data
-  | FrameError -> parse_error_body raw.data
-  | FrameUnknown i -> Result.Error (Printf.sprintf "Unknown frame type: %li" i)
-
 let send_expect_ok ~read_timeout ~write_timeout ~conn cmd =
   send ~timeout:write_timeout ~conn cmd >>= fun () ->
   read_raw_frame ~timeout:read_timeout conn >>= fun raw ->
-  match server_message_of_raw_frame raw with
+  match ServerMessage.of_raw_frame raw with
   | Ok ResponseOk -> return_unit
   | Ok sm -> fail_with @@ Printf.sprintf "Expected OK, got %s" (ServerMessage.to_string sm)
   | Error e -> fail_with (Printf.sprintf "Expected OK, got %s" e)
@@ -443,6 +442,42 @@ module Consumer = struct
       if Int.between ~low ~high value
       then Ok c
       else Error (Printf.sprintf "%s must be between %d and %d, got %d" name low high value)
+
+    let result_printer i r = 
+      let r = match r with
+        | Ok _ -> "Ok"
+        | Error s -> s
+      in
+      Stdio.print_endline (Printf.sprintf "%d: %s" i r)
+
+    let%expect_test "validate_positive" =
+      [
+        ( 1, "Field", () ) ;
+        ( 0, "Field", () ) ;
+        ( -1, "Field", () ) ;
+      ]
+      |> List.map ~f:(fun (v, name, c) -> validate_positive v name c)
+      |> List.iteri ~f:result_printer;
+      [%expect{|
+        0: Ok
+        1: Field must be greater than 0
+        2: Field must be greater than 0
+      |}]
+
+    let%expect_test "validate_between" =
+      [
+        ( 0, 0, 1, "Field", () );
+        ( 0, 10, 1, "Field", () );
+        ( 0, 10, 11, "Field", () );
+      ]
+      |> List.map ~f:(fun (low, high, v, name, c) -> validate_between ~low ~high v name c)
+      |> List.iteri ~f:result_printer;
+      [%expect{|
+        0: Field must be between 0 and 0, got 1
+        1: Ok
+        2: Field must be between 0 and 10, got 11
+      |}]
+
   end
 
   module VFloat = struct 
@@ -574,6 +609,22 @@ module Consumer = struct
     let bo = (backoff_multiplier *. (Float.of_int error_count)) in
     Float.min bo max_backoff_seconds
 
+  let%expect_test "backoff_duration" =
+    let test_cases = [
+      ( 1.0, 1 ) ;
+      ( 1.0, 2 );
+      ( 2.0, 4000);
+    ]
+    in
+    List.iteri ~f:(fun i (m, ec) ->
+        let r = backoff_duration m ec in
+        Stdio.print_endline (Printf.sprintf "%d %f" i r)
+      ) test_cases;
+    [%expect{|
+      0 1.000000
+      1 2.000000
+      2 3600.000000 |}]
+
   type mode =
     | ModeNsqd
     | ModeLookupd
@@ -674,7 +725,7 @@ module Consumer = struct
       Lwt_mvar.take mbox >>= function
       | RawFrame raw ->
         begin 
-          match server_message_of_raw_frame raw with
+          match ServerMessage.of_raw_frame raw with
           | Ok server_message ->
             Lwt.async 
               begin
@@ -870,7 +921,7 @@ module Producer = struct
     let with_conn c =
       let rec read_until_ok () =
         read_raw_frame ~timeout:default_read_timeout c.conn >>= fun frame ->
-        match server_message_of_raw_frame frame with
+        match ServerMessage.of_raw_frame frame with
         | Ok ResponseOk -> return_ok ()
         | Ok Heartbeat -> 
           send ~timeout:default_write_timeout ~conn:c.conn NOP >>= fun () ->
