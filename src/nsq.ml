@@ -9,13 +9,22 @@ let default_lookupd_port = 4161
 let network_buffer_size = 16 * 1024
 let recalculate_rdy_interval = 60.0
 
+module Seconds = struct
+  type t = float [@@deriving yojson]
+
+  let of_float f = f
+  let value s = s
+end
+
 module Milliseconds = struct
-  type t = Milliseconds of int64
+  type t = int64 [@@deriving yojson]
 
-  let of_int64 i =
-    Milliseconds i
+  let of_int64 i = i
+  let value i = i
 
-  let value (Milliseconds i) = i
+  let of_seconds s =
+    (Seconds.value s) *. 1000.0 |> Int64.of_float |> of_int64
+
 end
 
 let default_requeue_delay = Milliseconds.of_int64 5000L
@@ -105,12 +114,12 @@ end
 module IdentifyConfig = struct
   (* This will be encoded to JSON and sent with the IDENTIFY command *)
   type t = {
-    heartbeat_interval : int; (* In milliseconds  *)
+    heartbeat_interval : Milliseconds.t;
     client_id : string;
     hostname : string;
     user_agent : string;
     output_buffer_size : int; (* buffer size on bytes the server should use  *)
-    output_buffer_timeout : int;
+    output_buffer_timeout : Milliseconds.t;
     sample_rate : int;
   } [@@deriving yojson { strict = false }]
 end
@@ -330,6 +339,7 @@ let bytes_of_command = function
 
 (* Timeout will only apply if > 0.0 *)
 let maybe_timeout ~timeout f =
+  let timeout = Seconds.value timeout in
   if Float.(timeout <= 0.0)
   then f ()
   else Lwt_unix.with_timeout timeout f
@@ -507,21 +517,21 @@ module Consumer = struct
     backoff_multiplier : float;
 
     (* network timeouts in seconds *)
-    dial_timeout : float;
-    read_timeout : float;
-    write_timeout : float;
-    lookupd_poll_interval : float;
+    dial_timeout : Seconds.t;
+    read_timeout : Seconds.t;
+    write_timeout : Seconds.t;
+    lookupd_poll_interval : Seconds.t;
     lookupd_poll_jitter : float;
-    max_requeue_delay : float;
-    default_requeue_delay : float;
+    max_requeue_delay : Seconds.t;
+    default_requeue_delay : Seconds.t;
 
     (* The fields below are used in IdentifyConfig.t *)
-    heartbeat_interval : float;
+    heartbeat_interval : Seconds.t;
     client_id : string;
     hostname : string;
     user_agent : string;
     output_buffer_size : int; (* buffer size on bytes the server should use  *)
-    output_buffer_timeout : float;
+    output_buffer_timeout : Seconds.t;
     sample_rate : int; (* Between 0 and 99 *)
   }
 
@@ -530,38 +540,38 @@ module Consumer = struct
     VInt.validate_positive c.max_in_flight "max_in_flight" c
     >>= VInt.validate_between ~low:0 ~high:65535 c.max_attempts "max_attempts"
     >>= VFloat.validate_positive c.backoff_multiplier "backoff_multiplier"
-    >>= VFloat.validate_between ~low:0.0 ~high:300.0 c.dial_timeout "dial_timeout"
-    >>= VFloat.validate_between ~low:0.1 ~high:300.0 c.read_timeout "read_timeout"
-    >>= VFloat.validate_between ~low:0.1 ~high:300.0 c.write_timeout "write_timeout"
-    >>= VFloat.validate_between ~low:0.1 ~high:300.0 c.lookupd_poll_interval "lookupd_poll_interval"
+    >>= VFloat.validate_between ~low:0.0 ~high:300.0 (Seconds.value c.dial_timeout) "dial_timeout"
+    >>= VFloat.validate_between ~low:0.1 ~high:300.0 (Seconds.value c.read_timeout) "read_timeout"
+    >>= VFloat.validate_between ~low:0.1 ~high:300.0 (Seconds.value c.write_timeout) "write_timeout"
+    >>= VFloat.validate_between ~low:0.1 ~high:300.0 (Seconds.value c.lookupd_poll_interval) "lookupd_poll_interval"
     >>= VFloat.validate_between ~low:0.0 ~high:1.0 c.lookupd_poll_jitter "lookupd_poll_jitter"
-    >>= VFloat.validate_between ~low:0.0 ~high:(3600.) c.default_requeue_delay "default_requeue_delay"
-    >>= VFloat.validate_between ~low:0.0 ~high:(3600.) c.max_requeue_delay "max_requeue_delay"
-    >>= VFloat.validate_between ~low:0.01 ~high:300.0 c.output_buffer_timeout "output_buffer_timeout"
+    >>= VFloat.validate_between ~low:0.0 ~high:(3600.) (Seconds.value c.default_requeue_delay) "default_requeue_delay"
+    >>= VFloat.validate_between ~low:0.0 ~high:(3600.) (Seconds.value c.max_requeue_delay) "max_requeue_delay"
+    >>= VFloat.validate_between ~low:0.01 ~high:300.0 (Seconds.value c.output_buffer_timeout) "output_buffer_timeout"
     >>= VInt.validate_between ~low:64 ~high:(5 * 1025 * 1000) c.output_buffer_size "output_buffer_size"
     >>= VInt.validate_between ~low:0 ~high:99 c.sample_rate "sample_rate"
-    >>= VFloat.validate_between ~low:1.0 ~high:300.0 c.heartbeat_interval "heartbeat_interval"
+    >>= VFloat.validate_between ~low:1.0 ~high:300.0 (Seconds.value c.heartbeat_interval) "heartbeat_interval"
     >>= validate_not_blank c.client_id "client_id"
     >>= validate_not_blank c.hostname "hostname"
     >>= validate_not_blank c.user_agent "user_agent"
 
   let create_config 
-      ?(max_in_flight=1) 
-      ?(max_attempts=5)
-      ?(backoff_multiplier=0.5)
-      ?(dial_timeout=1.0)
-      ?(read_timeout = 60.0)
-      ?(write_timeout = 1.0)
-      ?(lookupd_poll_interval = 60.0)
+      ?(max_in_flight = 1)
+      ?(max_attempts = 5)
+      ?(backoff_multiplier = 0.5)
+      ?(dial_timeout = Seconds.of_float 1.0)
+      ?(read_timeout = Seconds.of_float 60.0)
+      ?(write_timeout = Seconds.of_float 1.0)
+      ?(lookupd_poll_interval = Seconds.of_float 60.0)
       ?(lookupd_poll_jitter = 0.3)
-      ?(heartbeat_interval = 60.0)
-      ?(max_requeue_delay = (15.0 *. 60.0))
-      ?(default_requeue_delay = 90.0)
+      ?(heartbeat_interval = Seconds.of_float 60.0)
+      ?(max_requeue_delay = Seconds.of_float (15.0 *. 60.0))
+      ?(default_requeue_delay = Seconds.of_float 90.0)
       ?(client_id = (Unix.gethostname ()))
       ?(hostname = (Unix.gethostname ()))
       ?(user_agent = "nsq-ocaml/0.2")
       ?(output_buffer_size = 16 * 1024)
-      ?(output_buffer_timeout = 0.25)
+      ?(output_buffer_timeout = Seconds.of_float 0.25)
       ?(sample_rate = 0)
       ()
     = 
@@ -586,14 +596,13 @@ module Consumer = struct
     }
 
   let extract_identify_config c = 
-    let to_ms f = Float.to_int (f *. 1000.0) in
     {
-      IdentifyConfig.heartbeat_interval = to_ms c.heartbeat_interval;
+      IdentifyConfig.heartbeat_interval = (Milliseconds.of_seconds c.heartbeat_interval);
       IdentifyConfig.client_id = c.client_id;
       IdentifyConfig.hostname = c.hostname;
       IdentifyConfig.user_agent = c.user_agent;
       IdentifyConfig.output_buffer_size = c.output_buffer_size;
-      IdentifyConfig.output_buffer_timeout = to_ms c.output_buffer_timeout;
+      IdentifyConfig.output_buffer_timeout = (Milliseconds.of_seconds c.output_buffer_timeout);
       IdentifyConfig.sample_rate = c.sample_rate;
     }
 
@@ -824,7 +833,7 @@ module Consumer = struct
     main_loop c address mbox
 
   let start_polling_lookupd c lookup_addresses =
-    let poll_interval = Float.((1.0 + (Random.float c.config.lookupd_poll_jitter)) * c.config.lookupd_poll_interval) in
+    let poll_interval = Float.((1.0 + (Random.float c.config.lookupd_poll_jitter)) * (Seconds.value c.config.lookupd_poll_interval)) in
     let rec check_for_producers running =
       catch
         begin
@@ -883,9 +892,9 @@ module Producer = struct
   }
 
   let default_pool_size = 5
-  let default_dial_timeout = 15.0
-  let default_write_timeout = 15.0
-  let default_read_timeout = 15.0
+  let default_dial_timeout = Seconds.of_float 15.0
+  let default_write_timeout = Seconds.of_float 15.0
+  let default_read_timeout = Seconds.of_float 15.0
 
   (** Throw away connections that are idle for this long
        Note that NSQ expects hearbeats to be answered every 30 seconds

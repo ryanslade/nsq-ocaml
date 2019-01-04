@@ -7,8 +7,8 @@ let lookupd_address = "172.17.0.2"
 
 let make_handler name =
   fun msg ->
-    Logs_lwt.debug (fun l -> l "(%s) Handled Body: %s" name (Bytes.to_string msg)) >>= fun () ->
-    return HandlerOK
+  Logs_lwt.debug (fun l -> l "(%s) Handled Body: %s" name (Bytes.to_string msg)) >>= fun () ->
+  return HandlerOK
 
 let publish_error_backoff = 1.0
 let publish_interval_seconds = 1.0
@@ -31,7 +31,7 @@ let create_consumer ~mode chan_name handler =
   let config =
     Consumer.create_config
       ~max_in_flight:100
-      ~lookupd_poll_interval:5.0
+      ~lookupd_poll_interval:(Seconds.of_float 5.0)
       ()
     |> Result.ok_or_failwith
   in
