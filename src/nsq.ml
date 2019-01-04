@@ -1,6 +1,7 @@
 open Base
 open Lwt
 
+let client_version = "0.3"
 let ephemeral_suffix = "#ephemeral"
 let default_backoff_seconds = 1.0
 let max_backoff_seconds = 3600.0
@@ -569,7 +570,7 @@ module Consumer = struct
       ?(default_requeue_delay = Seconds.of_float 90.0)
       ?(client_id = (Unix.gethostname ()))
       ?(hostname = (Unix.gethostname ()))
-      ?(user_agent = "nsq-ocaml/0.2")
+      ?(user_agent = Printf.sprintf "nsq-ocaml/%s" client_version)
       ?(output_buffer_size = 16 * 1024)
       ?(output_buffer_timeout = Seconds.of_float 0.25)
       ?(sample_rate = 0)
