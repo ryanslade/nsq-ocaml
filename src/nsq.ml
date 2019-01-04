@@ -444,6 +444,57 @@ let handle_server_message server_message handler max_attempts =
   | Message msg -> handle_message handler msg max_attempts >>= fun cmd -> return_some cmd
 
 module Consumer = struct
+  type config = {
+    (* The total number of messages allowed in flight for all connections of this consumer *)
+    max_in_flight : int;
+    max_attempts : int;
+    backoff_multiplier : float;
+
+    (* network timeouts in seconds *)
+    dial_timeout : Seconds.t;
+    read_timeout : Seconds.t;
+    write_timeout : Seconds.t;
+    lookupd_poll_interval : Seconds.t;
+    lookupd_poll_jitter : float;
+    max_requeue_delay : Seconds.t;
+    default_requeue_delay : Seconds.t;
+
+    (* The fields below are used in IdentifyConfig.t *)
+    heartbeat_interval : Seconds.t;
+    client_id : string;
+    hostname : string;
+    user_agent : string;
+    output_buffer_size : int; (* buffer size on bytes the server should use  *)
+    output_buffer_timeout : Seconds.t;
+    sample_rate : int; (* Between 0 and 99 *)
+  }
+
+  type mode =
+    | ModeNsqd
+    | ModeLookupd
+
+  type handler_func = bytes -> handler_result Lwt.t
+
+  type t = {
+    addresses : Address.t list;
+    (* The number of open NSQD connections *)
+    mutable nsqd_connections : int;
+    topic : Topic.t;
+    channel : Channel.t;
+    handler : handler_func;
+    config : config;
+    mode : mode;
+    log_prefix : string;
+  }
+
+  module TestHelper = struct
+    let result_printer i r = 
+      let r = match r with
+        | Ok _ -> "Ok"
+        | Error s -> s
+      in
+      Stdio.print_endline (Printf.sprintf "%d: %s" i r)
+  end
 
   module VInt = struct 
     let validate_positive value name c =
@@ -503,38 +554,54 @@ module Consumer = struct
       if Float.between ~low ~high value
       then Ok c
       else Error (Printf.sprintf "%s must be between %f and %f, got %f" name low high value)
-  end
 
+
+    let%expect_test "validate_positive" =
+      [
+        ( 1.0, "Field", () ) ;
+        ( 0.0, "Field", () ) ;
+        ( -1.0, "Field", () ) ;
+      ]
+      |> List.map ~f:(fun (v, name, c) -> validate_positive v name c)
+      |> List.iteri ~f:TestHelper.result_printer;
+      [%expect{|
+        0: Ok
+        1: Field must be greater than 0
+        2: Field must be greater than 0
+      |}]
+
+    let%expect_test "validate_between" =
+      [
+        ( 0.0, 0.0, 1.0, "Field", () );
+        ( 0.0, 10.0, 1.0, "Field", () );
+        ( 0.0, 10.0, 11.0, "Field", () );
+      ]
+      |> List.map ~f:(fun (low, high, v, name, c) -> validate_between ~low ~high v name c)
+      |> List.iteri ~f:TestHelper.result_printer;
+      [%expect{|
+        0: Field must be between 0.000000 and 0.000000, got 1.000000
+        1: Ok
+        2: Field must be between 0.000000 and 10.000000, got 11.000000
+      |}]
+
+  end
 
   let validate_not_blank s name c =
     if String.is_empty s
     then Error (Printf.sprintf "%s can't be blank" name)
     else Ok c
 
-  type config = {
-    (* The total number of messages allowed in flight for all connections of this consumer *)
-    max_in_flight : int;
-    max_attempts : int;
-    backoff_multiplier : float;
-
-    (* network timeouts in seconds *)
-    dial_timeout : Seconds.t;
-    read_timeout : Seconds.t;
-    write_timeout : Seconds.t;
-    lookupd_poll_interval : Seconds.t;
-    lookupd_poll_jitter : float;
-    max_requeue_delay : Seconds.t;
-    default_requeue_delay : Seconds.t;
-
-    (* The fields below are used in IdentifyConfig.t *)
-    heartbeat_interval : Seconds.t;
-    client_id : string;
-    hostname : string;
-    user_agent : string;
-    output_buffer_size : int; (* buffer size on bytes the server should use  *)
-    output_buffer_timeout : Seconds.t;
-    sample_rate : int; (* Between 0 and 99 *)
-  }
+  let%expect_test "validate_not_blank" =
+    [
+      ( "", "Field", () );
+      ( "X", "Field", () );
+    ]
+    |> List.map ~f:(fun (v, name, c) -> validate_not_blank v name c)
+    |> List.iteri ~f:TestHelper.result_printer;
+    [%expect{|
+        0: Field can't be blank
+        1: Ok
+      |}]
 
   let validate_config c =
     let open Result in
@@ -617,10 +684,11 @@ module Consumer = struct
     error_count : int;
   }
 
-  let backoff_duration backoff_multiplier error_count =
-    let bo = (backoff_multiplier *. (Float.of_int error_count)) in
+  let backoff_duration ~multiplier ~error_count =
+    let bo = (multiplier *. (Float.of_int error_count)) in
     Float.min bo max_backoff_seconds
 
+  (** TODO: Look at extracting common test table pattern *)
   let%expect_test "backoff_duration" =
     let test_cases = [
       ( 1.0, 1 ) ;
@@ -628,30 +696,14 @@ module Consumer = struct
       ( 2.0, 4000);
     ]
     in
-    List.iteri ~f:(fun i (m, ec) ->
-        let r = backoff_duration m ec in
+    List.iteri ~f:(fun i (multiplier, error_count) ->
+        let r = backoff_duration ~multiplier ~error_count in
         Stdio.print_endline (Printf.sprintf "%d %f" i r)
       ) test_cases;
     [%expect{|
       0 1.000000
       1 2.000000
       2 3600.000000 |}]
-
-  type mode =
-    | ModeNsqd
-    | ModeLookupd
-
-  type t = {
-    addresses : Address.t list;
-    (* The number of open NSQD connections *)
-    mutable nsqd_connections : int;
-    topic : Topic.t;
-    channel : Channel.t;
-    handler : (bytes -> handler_result Lwt.t);
-    config : config;
-    mode : mode;
-    log_prefix : string;
-  }
 
   let create ?(mode=ModeNsqd) ?config addresses topic channel handler =
     let config = match config with
@@ -676,7 +728,7 @@ module Consumer = struct
     else c.config.max_in_flight / c.nsqd_connections
 
   let do_after duration f =
-    Logs_lwt.debug (fun l -> l "Sleeping for %f seconds" duration) >>= fun () ->
+    Logs_lwt.debug (fun l -> l "Sleeping for %f seconds" (Seconds.value duration)) >>= fun () ->
     Lwt_unix.sleep duration >>= f
 
   type loop_message =
@@ -699,9 +751,9 @@ module Consumer = struct
   let open_breaker c conn mbox bs =
     (* Send RDY 0 and send retry trial command after a delay  *)
     Logs_lwt.debug (fun l -> l "Breaker open, sending RDY 0") >>= fun () ->
-    send ~timeout:c.config.dial_timeout ~conn (RDY 0) >|= fun () ->
+    send ~timeout:c.config.write_timeout ~conn (RDY 0) >|= fun () ->
     let bs = { error_count = bs.error_count + 1; position = Open } in
-    let duration = backoff_duration c.config.backoff_multiplier bs.error_count in
+    let duration = backoff_duration ~multiplier:c.config.backoff_multiplier ~error_count:bs.error_count in
     async (fun () -> do_after duration (fun () -> Lwt_mvar.put mbox TrialBreaker));
     bs
 
