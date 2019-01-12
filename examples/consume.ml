@@ -33,7 +33,7 @@ let handler _ =
 
 let () = 
   setup_logging (Some Logs.Debug);
-  let config = Consumer.create_config ~max_in_flight:in_flight () |> Result.ok_or_failwith in
+  let config = Consumer.Config.create ~max_in_flight:in_flight () |> Result.ok_or_failwith in
   let consumer = 
     Consumer.create
       ~mode:Consumer.ModeNsqd

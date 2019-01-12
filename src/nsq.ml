@@ -25,7 +25,6 @@ module Milliseconds = struct
 
   let of_seconds s =
     (Seconds.value s) *. 1000.0 |> Int64.of_float |> of_int64
-
 end
 
 let default_requeue_delay = Milliseconds.of_int64 5000L
@@ -443,31 +442,220 @@ let handle_server_message server_message handler max_attempts =
   | ErrorTOUCHFailed s -> warn_return_none "ErrorTOUCHFailed" s 
   | Message msg -> handle_message handler msg max_attempts >>= fun cmd -> return_some cmd
 
+module TestHelper = struct
+  let result_printer i r = 
+    let r = match r with
+      | Ok _ -> "Ok"
+      | Error s -> s
+    in
+    Stdio.print_endline (Printf.sprintf "%d: %s" i r)
+end
+
+module VInt = struct 
+  let validate_positive value name c =
+    if Int.is_positive value
+    then Ok c
+    else Error (Printf.sprintf "%s must be greater than 0" name)
+
+  let validate_between ~low ~high value name c =
+    if Int.between ~low ~high value
+    then Ok c
+    else Error (Printf.sprintf "%s must be between %d and %d, got %d" name low high value)
+
+  let result_printer i r = 
+    let r = match r with
+      | Ok _ -> "Ok"
+      | Error s -> s
+    in
+    Stdio.print_endline (Printf.sprintf "%d: %s" i r)
+
+  let%expect_test "validate_positive" =
+    [
+      ( 1, "Field", () ) ;
+      ( 0, "Field", () ) ;
+      ( -1, "Field", () ) ;
+    ]
+    |> List.map ~f:(fun (v, name, c) -> validate_positive v name c)
+    |> List.iteri ~f:result_printer;
+    [%expect{|
+        0: Ok
+        1: Field must be greater than 0
+        2: Field must be greater than 0
+      |}]
+
+  let%expect_test "validate_between" =
+    [
+      ( 0, 0, 1, "Field", () );
+      ( 0, 10, 1, "Field", () );
+      ( 0, 10, 11, "Field", () );
+    ]
+    |> List.map ~f:(fun (low, high, v, name, c) -> validate_between ~low ~high v name c)
+    |> List.iteri ~f:result_printer;
+    [%expect{|
+        0: Field must be between 0 and 0, got 1
+        1: Ok
+        2: Field must be between 0 and 10, got 11
+      |}]
+
+end
+
+module VFloat = struct 
+  let validate_positive value name c =
+    if Float.is_positive value
+    then Ok c
+    else Error (Printf.sprintf "%s must be greater than 0" name)
+
+  let validate_between ~low ~high value name c =
+    if Float.between ~low ~high value
+    then Ok c
+    else Error (Printf.sprintf "%s must be between %f and %f, got %f" name low high value)
+
+  let%expect_test "validate_positive" =
+    [
+      ( 1.0, "Field", () ) ;
+      ( 0.0, "Field", () ) ;
+      ( -1.0, "Field", () ) ;
+    ]
+    |> List.map ~f:(fun (v, name, c) -> validate_positive v name c)
+    |> List.iteri ~f:TestHelper.result_printer;
+    [%expect{|
+        0: Ok
+        1: Field must be greater than 0
+        2: Field must be greater than 0
+      |}]
+
+  let%expect_test "validate_between" =
+    [
+      ( 0.0, 0.0, 1.0, "Field", () );
+      ( 0.0, 10.0, 1.0, "Field", () );
+      ( 0.0, 10.0, 11.0, "Field", () );
+    ]
+    |> List.map ~f:(fun (low, high, v, name, c) -> validate_between ~low ~high v name c)
+    |> List.iteri ~f:TestHelper.result_printer;
+    [%expect{|
+        0: Field must be between 0.000000 and 0.000000, got 1.000000
+        1: Ok
+        2: Field must be between 0.000000 and 10.000000, got 11.000000
+      |}]
+
+end
+
+let validate_not_blank s name c =
+  if String.is_empty s
+  then Error (Printf.sprintf "%s can't be blank" name)
+  else Ok c
+
+let%expect_test "validate_not_blank" =
+  [
+    ( "", "Field", () );
+    ( "X", "Field", () );
+  ]
+  |> List.map ~f:(fun (v, name, c) -> validate_not_blank v name c)
+  |> List.iteri ~f:TestHelper.result_printer;
+  [%expect{|
+        0: Field can't be blank
+        1: Ok
+      |}]
+
 module Consumer = struct
-  type config = {
-    (* The total number of messages allowed in flight for all connections of this consumer *)
-    max_in_flight : int;
-    max_attempts : int;
-    backoff_multiplier : float;
+  module Config = struct
+    type t = {
+      (* The total number of messages allowed in flight for all connections of this consumer *)
+      max_in_flight : int;
+      max_attempts : int;
+      backoff_multiplier : float;
 
-    (* network timeouts in seconds *)
-    dial_timeout : Seconds.t;
-    read_timeout : Seconds.t;
-    write_timeout : Seconds.t;
-    lookupd_poll_interval : Seconds.t;
-    lookupd_poll_jitter : float;
-    max_requeue_delay : Seconds.t;
-    default_requeue_delay : Seconds.t;
+      (* network timeouts in seconds *)
+      dial_timeout : Seconds.t;
+      read_timeout : Seconds.t;
+      write_timeout : Seconds.t;
+      lookupd_poll_interval : Seconds.t;
+      lookupd_poll_jitter : float;
+      max_requeue_delay : Seconds.t;
+      default_requeue_delay : Seconds.t;
 
-    (* The fields below are used in IdentifyConfig.t *)
-    heartbeat_interval : Seconds.t;
-    client_id : string;
-    hostname : string;
-    user_agent : string;
-    output_buffer_size : int; (* buffer size on bytes the server should use  *)
-    output_buffer_timeout : Seconds.t;
-    sample_rate : int; (* Between 0 and 99 *)
-  }
+      (* The fields below are used in IdentifyConfig.t *)
+      heartbeat_interval : Seconds.t;
+      client_id : string;
+      hostname : string;
+      user_agent : string;
+      output_buffer_size : int; (* buffer size on bytes the server should use  *)
+      output_buffer_timeout : Seconds.t;
+      sample_rate : int; (* Between 0 and 99 *)
+    }
+
+    let validate c =
+      let open Result in
+      VInt.validate_positive c.max_in_flight "max_in_flight" c
+      >>= VInt.validate_between ~low:0 ~high:65535 c.max_attempts "max_attempts"
+      >>= VFloat.validate_positive c.backoff_multiplier "backoff_multiplier"
+      >>= VFloat.validate_between ~low:0.0 ~high:300.0 (Seconds.value c.dial_timeout) "dial_timeout"
+      >>= VFloat.validate_between ~low:0.1 ~high:300.0 (Seconds.value c.read_timeout) "read_timeout"
+      >>= VFloat.validate_between ~low:0.1 ~high:300.0 (Seconds.value c.write_timeout) "write_timeout"
+      >>= VFloat.validate_between ~low:0.1 ~high:300.0 (Seconds.value c.lookupd_poll_interval) "lookupd_poll_interval"
+      >>= VFloat.validate_between ~low:0.0 ~high:1.0 c.lookupd_poll_jitter "lookupd_poll_jitter"
+      >>= VFloat.validate_between ~low:0.0 ~high:(3600.) (Seconds.value c.default_requeue_delay) "default_requeue_delay"
+      >>= VFloat.validate_between ~low:0.0 ~high:(3600.) (Seconds.value c.max_requeue_delay) "max_requeue_delay"
+      >>= VFloat.validate_between ~low:0.01 ~high:300.0 (Seconds.value c.output_buffer_timeout) "output_buffer_timeout"
+      >>= VInt.validate_between ~low:64 ~high:(5 * 1025 * 1000) c.output_buffer_size "output_buffer_size"
+      >>= VInt.validate_between ~low:0 ~high:99 c.sample_rate "sample_rate"
+      >>= VFloat.validate_between ~low:1.0 ~high:300.0 (Seconds.value c.heartbeat_interval) "heartbeat_interval"
+      >>= validate_not_blank c.client_id "client_id"
+      >>= validate_not_blank c.hostname "hostname"
+      >>= validate_not_blank c.user_agent "user_agent"
+
+    let create 
+        ?(max_in_flight = 1)
+        ?(max_attempts = 5)
+        ?(backoff_multiplier = 0.5)
+        ?(dial_timeout = Seconds.of_float 1.0)
+        ?(read_timeout = Seconds.of_float 60.0)
+        ?(write_timeout = Seconds.of_float 1.0)
+        ?(lookupd_poll_interval = Seconds.of_float 60.0)
+        ?(lookupd_poll_jitter = 0.3)
+        ?(heartbeat_interval = Seconds.of_float 60.0)
+        ?(max_requeue_delay = Seconds.of_float (15.0 *. 60.0))
+        ?(default_requeue_delay = Seconds.of_float 90.0)
+        ?(client_id = (Unix.gethostname ()))
+        ?(hostname = (Unix.gethostname ()))
+        ?(user_agent = Printf.sprintf "nsq-ocaml/%s" client_version)
+        ?(output_buffer_size = 16 * 1024)
+        ?(output_buffer_timeout = Seconds.of_float 0.25)
+        ?(sample_rate = 0)
+        ()
+      = 
+      validate {
+        max_in_flight;
+        max_attempts;
+        backoff_multiplier;
+        dial_timeout;
+        read_timeout;
+        write_timeout;
+        lookupd_poll_interval;
+        lookupd_poll_jitter;
+        max_requeue_delay;
+        default_requeue_delay;
+        heartbeat_interval;
+        client_id;
+        hostname;
+        user_agent;
+        output_buffer_size;
+        output_buffer_timeout;
+        sample_rate;
+      }
+
+    let to_identity_config c = 
+      {
+        IdentifyConfig.heartbeat_interval = (Milliseconds.of_seconds c.heartbeat_interval);
+        IdentifyConfig.client_id = c.client_id;
+        IdentifyConfig.hostname = c.hostname;
+        IdentifyConfig.user_agent = c.user_agent;
+        IdentifyConfig.output_buffer_size = c.output_buffer_size;
+        IdentifyConfig.output_buffer_timeout = (Milliseconds.of_seconds c.output_buffer_timeout);
+        IdentifyConfig.sample_rate = c.sample_rate;
+      }
+
+  end
 
   type mode =
     | ModeNsqd
@@ -482,197 +670,10 @@ module Consumer = struct
     topic : Topic.t;
     channel : Channel.t;
     handler : handler_func;
-    config : config;
+    config : Config.t;
     mode : mode;
     log_prefix : string;
   }
-
-  module TestHelper = struct
-    let result_printer i r = 
-      let r = match r with
-        | Ok _ -> "Ok"
-        | Error s -> s
-      in
-      Stdio.print_endline (Printf.sprintf "%d: %s" i r)
-  end
-
-  module VInt = struct 
-    let validate_positive value name c =
-      if Int.is_positive value
-      then Ok c
-      else Error (Printf.sprintf "%s must be greater than 0" name)
-
-    let validate_between ~low ~high value name c =
-      if Int.between ~low ~high value
-      then Ok c
-      else Error (Printf.sprintf "%s must be between %d and %d, got %d" name low high value)
-
-    let result_printer i r = 
-      let r = match r with
-        | Ok _ -> "Ok"
-        | Error s -> s
-      in
-      Stdio.print_endline (Printf.sprintf "%d: %s" i r)
-
-    let%expect_test "validate_positive" =
-      [
-        ( 1, "Field", () ) ;
-        ( 0, "Field", () ) ;
-        ( -1, "Field", () ) ;
-      ]
-      |> List.map ~f:(fun (v, name, c) -> validate_positive v name c)
-      |> List.iteri ~f:result_printer;
-      [%expect{|
-        0: Ok
-        1: Field must be greater than 0
-        2: Field must be greater than 0
-      |}]
-
-    let%expect_test "validate_between" =
-      [
-        ( 0, 0, 1, "Field", () );
-        ( 0, 10, 1, "Field", () );
-        ( 0, 10, 11, "Field", () );
-      ]
-      |> List.map ~f:(fun (low, high, v, name, c) -> validate_between ~low ~high v name c)
-      |> List.iteri ~f:result_printer;
-      [%expect{|
-        0: Field must be between 0 and 0, got 1
-        1: Ok
-        2: Field must be between 0 and 10, got 11
-      |}]
-
-  end
-
-  module VFloat = struct 
-    let validate_positive value name c =
-      if Float.is_positive value
-      then Ok c
-      else Error (Printf.sprintf "%s must be greater than 0" name)
-
-    let validate_between ~low ~high value name c =
-      if Float.between ~low ~high value
-      then Ok c
-      else Error (Printf.sprintf "%s must be between %f and %f, got %f" name low high value)
-
-
-    let%expect_test "validate_positive" =
-      [
-        ( 1.0, "Field", () ) ;
-        ( 0.0, "Field", () ) ;
-        ( -1.0, "Field", () ) ;
-      ]
-      |> List.map ~f:(fun (v, name, c) -> validate_positive v name c)
-      |> List.iteri ~f:TestHelper.result_printer;
-      [%expect{|
-        0: Ok
-        1: Field must be greater than 0
-        2: Field must be greater than 0
-      |}]
-
-    let%expect_test "validate_between" =
-      [
-        ( 0.0, 0.0, 1.0, "Field", () );
-        ( 0.0, 10.0, 1.0, "Field", () );
-        ( 0.0, 10.0, 11.0, "Field", () );
-      ]
-      |> List.map ~f:(fun (low, high, v, name, c) -> validate_between ~low ~high v name c)
-      |> List.iteri ~f:TestHelper.result_printer;
-      [%expect{|
-        0: Field must be between 0.000000 and 0.000000, got 1.000000
-        1: Ok
-        2: Field must be between 0.000000 and 10.000000, got 11.000000
-      |}]
-
-  end
-
-  let validate_not_blank s name c =
-    if String.is_empty s
-    then Error (Printf.sprintf "%s can't be blank" name)
-    else Ok c
-
-  let%expect_test "validate_not_blank" =
-    [
-      ( "", "Field", () );
-      ( "X", "Field", () );
-    ]
-    |> List.map ~f:(fun (v, name, c) -> validate_not_blank v name c)
-    |> List.iteri ~f:TestHelper.result_printer;
-    [%expect{|
-        0: Field can't be blank
-        1: Ok
-      |}]
-
-  let validate_config c =
-    let open Result in
-    VInt.validate_positive c.max_in_flight "max_in_flight" c
-    >>= VInt.validate_between ~low:0 ~high:65535 c.max_attempts "max_attempts"
-    >>= VFloat.validate_positive c.backoff_multiplier "backoff_multiplier"
-    >>= VFloat.validate_between ~low:0.0 ~high:300.0 (Seconds.value c.dial_timeout) "dial_timeout"
-    >>= VFloat.validate_between ~low:0.1 ~high:300.0 (Seconds.value c.read_timeout) "read_timeout"
-    >>= VFloat.validate_between ~low:0.1 ~high:300.0 (Seconds.value c.write_timeout) "write_timeout"
-    >>= VFloat.validate_between ~low:0.1 ~high:300.0 (Seconds.value c.lookupd_poll_interval) "lookupd_poll_interval"
-    >>= VFloat.validate_between ~low:0.0 ~high:1.0 c.lookupd_poll_jitter "lookupd_poll_jitter"
-    >>= VFloat.validate_between ~low:0.0 ~high:(3600.) (Seconds.value c.default_requeue_delay) "default_requeue_delay"
-    >>= VFloat.validate_between ~low:0.0 ~high:(3600.) (Seconds.value c.max_requeue_delay) "max_requeue_delay"
-    >>= VFloat.validate_between ~low:0.01 ~high:300.0 (Seconds.value c.output_buffer_timeout) "output_buffer_timeout"
-    >>= VInt.validate_between ~low:64 ~high:(5 * 1025 * 1000) c.output_buffer_size "output_buffer_size"
-    >>= VInt.validate_between ~low:0 ~high:99 c.sample_rate "sample_rate"
-    >>= VFloat.validate_between ~low:1.0 ~high:300.0 (Seconds.value c.heartbeat_interval) "heartbeat_interval"
-    >>= validate_not_blank c.client_id "client_id"
-    >>= validate_not_blank c.hostname "hostname"
-    >>= validate_not_blank c.user_agent "user_agent"
-
-  let create_config 
-      ?(max_in_flight = 1)
-      ?(max_attempts = 5)
-      ?(backoff_multiplier = 0.5)
-      ?(dial_timeout = Seconds.of_float 1.0)
-      ?(read_timeout = Seconds.of_float 60.0)
-      ?(write_timeout = Seconds.of_float 1.0)
-      ?(lookupd_poll_interval = Seconds.of_float 60.0)
-      ?(lookupd_poll_jitter = 0.3)
-      ?(heartbeat_interval = Seconds.of_float 60.0)
-      ?(max_requeue_delay = Seconds.of_float (15.0 *. 60.0))
-      ?(default_requeue_delay = Seconds.of_float 90.0)
-      ?(client_id = (Unix.gethostname ()))
-      ?(hostname = (Unix.gethostname ()))
-      ?(user_agent = Printf.sprintf "nsq-ocaml/%s" client_version)
-      ?(output_buffer_size = 16 * 1024)
-      ?(output_buffer_timeout = Seconds.of_float 0.25)
-      ?(sample_rate = 0)
-      ()
-    = 
-    validate_config {
-      max_in_flight;
-      max_attempts;
-      backoff_multiplier;
-      dial_timeout;
-      read_timeout;
-      write_timeout;
-      lookupd_poll_interval;
-      lookupd_poll_jitter;
-      max_requeue_delay;
-      default_requeue_delay;
-      heartbeat_interval;
-      client_id;
-      hostname;
-      user_agent;
-      output_buffer_size;
-      output_buffer_timeout;
-      sample_rate;
-    }
-
-  let extract_identify_config c = 
-    {
-      IdentifyConfig.heartbeat_interval = (Milliseconds.of_seconds c.heartbeat_interval);
-      IdentifyConfig.client_id = c.client_id;
-      IdentifyConfig.hostname = c.hostname;
-      IdentifyConfig.user_agent = c.user_agent;
-      IdentifyConfig.output_buffer_size = c.output_buffer_size;
-      IdentifyConfig.output_buffer_timeout = (Milliseconds.of_seconds c.output_buffer_timeout);
-      IdentifyConfig.sample_rate = c.sample_rate;
-    }
 
   type breaker_position =
     | Closed
@@ -688,7 +689,6 @@ module Consumer = struct
     let bo = (multiplier *. (Float.of_int error_count)) in
     Float.min bo max_backoff_seconds
 
-  (** TODO: Look at extracting common test table pattern *)
   let%expect_test "backoff_duration" =
     let test_cases = [
       ( 1.0, 1 ) ;
@@ -708,7 +708,7 @@ module Consumer = struct
   let create ?(mode=ModeNsqd) ?config addresses topic channel handler =
     let config = match config with
       (* We're assuming create_config with defaults always returns valid config *)
-      | None -> create_config () |> Result.ok_or_failwith
+      | None -> Config.create () |> Result.ok_or_failwith
       | Some c -> c
     in
     { 
@@ -825,7 +825,7 @@ module Consumer = struct
           mbox_loop bs
     in
     send MAGIC >>= fun () ->
-    let ic = extract_identify_config c.config in
+    let ic = Config.to_identity_config c.config in
     identify ~read_timeout:c.config.read_timeout ~write_timeout:c.config.write_timeout ~conn ic >>= fun () ->
     subscribe ~read_timeout:c.config.read_timeout ~write_timeout:c.config.write_timeout ~conn c.topic c.channel >>= fun () ->
     (* Start cautiously by sending RDY 1 *) 

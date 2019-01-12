@@ -29,7 +29,7 @@ let test_publish () =
 
 let create_consumer ~mode chan_name handler =
   let config =
-    Consumer.create_config
+    Consumer.Config.create
       ~max_in_flight:100
       ~lookupd_poll_interval:(Seconds.of_float 5.0)
       ()

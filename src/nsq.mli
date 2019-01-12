@@ -53,36 +53,38 @@ module Producer : sig
 end
 
 module Consumer : sig
+  module Config : sig
+    type t
+
+    val create :
+      ?max_in_flight:int
+      -> ?max_attempts:int
+      -> ?backoff_multiplier:float
+      -> ?dial_timeout:Seconds.t
+      -> ?read_timeout:Seconds.t
+      -> ?write_timeout:Seconds.t
+      -> ?lookupd_poll_interval:Seconds.t
+      -> ?lookupd_poll_jitter:float
+      -> ?heartbeat_interval:Seconds.t
+      -> ?max_requeue_delay:Seconds.t
+      -> ?default_requeue_delay:Seconds.t
+      -> ?client_id:string
+      -> ?hostname:string
+      -> ?user_agent:string
+      -> ?output_buffer_size:int
+      -> ?output_buffer_timeout:Seconds.t
+      -> ?sample_rate : int
+      -> unit
+      -> (t, string) result
+  end
+
   type t
-
-  type config
-
-  val create_config :
-    ?max_in_flight:int
-    -> ?max_attempts:int
-    -> ?backoff_multiplier:float
-    -> ?dial_timeout:Seconds.t
-    -> ?read_timeout:Seconds.t
-    -> ?write_timeout:Seconds.t
-    -> ?lookupd_poll_interval:Seconds.t
-    -> ?lookupd_poll_jitter:float
-    -> ?heartbeat_interval:Seconds.t
-    -> ?max_requeue_delay:Seconds.t
-    -> ?default_requeue_delay:Seconds.t
-    -> ?client_id:string
-    -> ?hostname:string
-    -> ?user_agent:string
-    -> ?output_buffer_size:int
-    -> ?output_buffer_timeout:Seconds.t
-    -> ?sample_rate : int
-    -> unit
-    -> (config, string) result
 
   type mode =
     | ModeNsqd
     | ModeLookupd
 
-  val create : ?mode:mode -> ?config:config -> Address.t list -> Topic.t -> Channel.t -> (bytes -> handler_result Lwt.t) -> t
+  val create : ?mode:mode -> ?config:Config.t -> Address.t list -> Topic.t -> Channel.t -> (bytes -> handler_result Lwt.t) -> t
   val run : t -> unit Lwt.t
 end
 
