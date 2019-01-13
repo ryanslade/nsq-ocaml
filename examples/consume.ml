@@ -29,7 +29,7 @@ let setup_logging level =
 
 let handler _ =
   Int.incr consumed;
-  return HandlerOK
+  return Consumer.HandlerOK
 
 let () = 
   setup_logging (Some Logs.Debug);

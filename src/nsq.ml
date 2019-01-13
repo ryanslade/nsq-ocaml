@@ -217,10 +217,6 @@ module ServerMessage = struct
 
 end
 
-type handler_result =
-  | HandlerOK
-  | HandlerRequeue
-
 module Lookup = struct
   type producer = {
     remote_address: string;
@@ -411,47 +407,6 @@ let subscribe ~read_timeout ~write_timeout ~conn topic channel =
 let identify ~read_timeout ~write_timeout ~conn ic =
   send_expect_ok ~read_timeout ~write_timeout ~conn (IDENTIFY ic)
 
-let handle_message handler msg max_attempts =
-  let requeue_delay attempts =
-    let d = Milliseconds.value default_requeue_delay in
-    let attempts = Int64.of_int_exn attempts in
-    Milliseconds.of_int64 Int64.(d * attempts)
-  in
-  catch_result1 handler msg.body >>=
-  begin
-    function
-    | Ok r -> return r
-    | Error e ->
-      Logs_lwt.err (fun l -> l "Handler error: %s" (Exn.to_string e)) >>= fun () ->
-      return HandlerRequeue
-  end
-  >>= function
-  | HandlerOK -> return (FIN msg.id)
-  | HandlerRequeue -> 
-    let attempts = Unsigned.UInt16.to_int msg.attempts in
-    if attempts >= max_attempts
-    then 
-      (Logs_lwt.warn (fun l -> l "Discarding message %s as reached max attempts, %d" (MessageID.to_string msg.id) attempts) >>= fun () ->
-       return (FIN msg.id))
-    else
-      let delay = requeue_delay attempts in
-      return (REQ (msg.id, delay))
-
-let handle_server_message server_message handler max_attempts =
-  let warn_return_none name msg = 
-    Logs_lwt.warn (fun l -> l "%s: %s" name msg) >>= fun () -> return_none 
-  in
-  let open ServerMessage in
-  match server_message with
-  | ResponseOk -> return_none
-  | Heartbeat -> Logs_lwt.debug (fun l -> l "Received heartbeat") >>= fun () -> return_some NOP
-  | ErrorInvalid s ->  warn_return_none "ErrorInvalid" s
-  | ErrorBadTopic s -> warn_return_none "ErrorBadTopic" s 
-  | ErrorBadChannel s -> warn_return_none "ErrorBadChannel" s 
-  | ErrorFINFailed s -> warn_return_none "ErrorFINFailed" s 
-  | ErrorREQFailed s -> warn_return_none "ErrorREQFailed" s 
-  | ErrorTOUCHFailed s -> warn_return_none "ErrorTOUCHFailed" s 
-  | Message msg -> handle_message handler msg max_attempts >>= fun cmd -> return_some cmd
 
 module TestHelper = struct
   let result_printer i r = 
@@ -672,6 +627,10 @@ module Consumer = struct
     | ModeNsqd
     | ModeLookupd
 
+  type handler_result =
+    | HandlerOK
+    | HandlerRequeue
+
   type handler_func = bytes -> handler_result Lwt.t
 
   type t = {
@@ -749,6 +708,49 @@ module Consumer = struct
     | TrialBreaker
     | ConnectionError of exn
     | RecalcRDY
+
+  let handle_message handler msg max_attempts =
+    let requeue_delay attempts =
+      let d = Milliseconds.value default_requeue_delay in
+      let attempts = Int64.of_int_exn attempts in
+      Milliseconds.of_int64 Int64.(d * attempts)
+    in
+    catch_result1 handler msg.body >>=
+    begin
+      function
+      | Ok r -> return r
+      | Error e ->
+        Logs_lwt.err (fun l -> l "Handler error: %s" (Exn.to_string e)) >>= fun () ->
+        return HandlerRequeue
+    end
+    >>= function
+    | HandlerOK -> return (FIN msg.id)
+    | HandlerRequeue -> 
+      let attempts = Unsigned.UInt16.to_int msg.attempts in
+      if attempts >= max_attempts
+      then 
+        (Logs_lwt.warn (fun l -> l "Discarding message %s as reached max attempts, %d" (MessageID.to_string msg.id) attempts) >>= fun () ->
+         return (FIN msg.id))
+      else
+        let delay = requeue_delay attempts in
+        return (REQ (msg.id, delay))
+
+  let handle_server_message server_message handler max_attempts =
+    let warn_return_none name msg = 
+      Logs_lwt.warn (fun l -> l "%s: %s" name msg) >>= fun () -> return_none 
+    in
+    let open ServerMessage in
+    match server_message with
+    | ResponseOk -> return_none
+    | Heartbeat -> Logs_lwt.debug (fun l -> l "Received heartbeat") >>= fun () -> return_some NOP
+    | ErrorInvalid s ->  warn_return_none "ErrorInvalid" s
+    | ErrorBadTopic s -> warn_return_none "ErrorBadTopic" s 
+    | ErrorBadChannel s -> warn_return_none "ErrorBadChannel" s 
+    | ErrorFINFailed s -> warn_return_none "ErrorFINFailed" s 
+    | ErrorREQFailed s -> warn_return_none "ErrorREQFailed" s 
+    | ErrorTOUCHFailed s -> warn_return_none "ErrorTOUCHFailed" s 
+    | Message msg -> handle_message handler msg max_attempts >>= fun cmd -> return_some cmd
+
 
   let rec read_loop ~timeout conn mbox =
     let put_async m = Lwt.async @@ fun () -> Lwt_mvar.put mbox m in

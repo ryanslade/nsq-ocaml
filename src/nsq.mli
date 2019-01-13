@@ -41,10 +41,6 @@ module Topic : sig
   val to_string : t -> string
 end
 
-type handler_result =
-  | HandlerOK
-  | HandlerRequeue
-
 module Producer : sig
   type t
   val create : ?pool_size:int -> Address.t -> (t, string) result
@@ -83,6 +79,10 @@ module Consumer : sig
   type mode =
     | ModeNsqd
     | ModeLookupd
+
+  type handler_result =
+    | HandlerOK
+    | HandlerRequeue
 
   val create : ?mode:mode -> ?config:Config.t -> Address.t list -> Topic.t -> Channel.t -> (bytes -> handler_result Lwt.t) -> t
   val run : t -> unit Lwt.t

@@ -8,7 +8,7 @@ let lookupd_address = "172.17.0.2"
 let make_handler name =
   fun msg ->
   Logs_lwt.debug (fun l -> l "(%s) Handled Body: %s" name (Bytes.to_string msg)) >>= fun () ->
-  return HandlerOK
+  return Consumer.HandlerOK
 
 let publish_error_backoff = 1.0
 let publish_interval_seconds = 1.0
