@@ -10,14 +10,25 @@ let default_lookupd_port = 4161
 let network_buffer_size = 16 * 1024
 let recalculate_rdy_interval = 60.0
 
-module Seconds = struct
+module Seconds : sig
+  type t
+
+  val of_float : float -> t
+  val value : t -> float
+end = struct
   type t = float [@@deriving yojson]
 
   let of_float f = f
   let value s = s
 end
 
-module Milliseconds = struct
+module Milliseconds : sig
+  type t [@@deriving yojson]
+
+  val of_int64 : int64 -> t
+  val value : t -> int64
+  val of_seconds : Seconds.t -> t
+end = struct
   type t = int64 [@@deriving yojson]
 
   let of_int64 i = i
@@ -688,6 +699,7 @@ module Consumer = struct
   let backoff_duration ~multiplier ~error_count =
     let bo = (multiplier *. (Float.of_int error_count)) in
     Float.min bo max_backoff_seconds
+    |> Seconds.of_float
 
   let%expect_test "backoff_duration" =
     let test_cases = [
@@ -698,7 +710,7 @@ module Consumer = struct
     in
     List.iteri ~f:(fun i (multiplier, error_count) ->
         let r = backoff_duration ~multiplier ~error_count in
-        Stdio.print_endline (Printf.sprintf "%d %f" i r)
+        Stdio.print_endline (Printf.sprintf "%d %f" i (Seconds.value r))
       ) test_cases;
     [%expect{|
       0 1.000000
@@ -729,7 +741,7 @@ module Consumer = struct
 
   let do_after duration f =
     Logs_lwt.debug (fun l -> l "Sleeping for %f seconds" (Seconds.value duration)) >>= fun () ->
-    Lwt_unix.sleep duration >>= f
+    Lwt_unix.sleep (Seconds.value duration) >>= f
 
   type loop_message =
     | RawFrame of raw_frame
