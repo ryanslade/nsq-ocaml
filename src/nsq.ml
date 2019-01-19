@@ -636,7 +636,7 @@ module Consumer = struct
   type t = {
     addresses : Address.t list;
     (* The number of open NSQD connections *)
-    mutable nsqd_connections : int;
+    mutable open_connections : int;
     topic : Topic.t;
     channel : Channel.t;
     handler : handler_func;
@@ -684,7 +684,7 @@ module Consumer = struct
     in
     { 
       addresses;
-      nsqd_connections = 0;
+      open_connections = 0;
       topic; 
       channel; 
       handler;
@@ -694,9 +694,9 @@ module Consumer = struct
     }
 
   let rdy_per_connection c =
-    if c.nsqd_connections = 0 || (c.config.max_in_flight < c.nsqd_connections)
+    if c.open_connections = 0 || (c.config.max_in_flight < c.open_connections)
     then 1
-    else c.config.max_in_flight / c.nsqd_connections
+    else c.config.max_in_flight / c.open_connections
 
   let do_after duration f =
     Logs_lwt.debug (fun l -> l "Sleeping for %f seconds" (Seconds.value duration)) >>= fun () ->
@@ -860,12 +860,12 @@ module Consumer = struct
           (Lwt_io.close (snd conn));
           (Lwt_unix.sleep default_backoff_seconds)]
       in
-      c.nsqd_connections <- c.nsqd_connections + 1;
-      Logs_lwt.debug ( fun l -> l "%s %d connections" c.log_prefix c.nsqd_connections) >>= fun () ->
+      c.open_connections <- c.open_connections + 1;
+      Logs_lwt.debug ( fun l -> l "%s %d connections" c.log_prefix c.open_connections) >>= fun () ->
       catch (fun () -> consume c conn mbox) handle_ex >>= fun () ->
       (* If we get here it means that something failed and we need to reconnect *)
-      c.nsqd_connections <- (max 0 (c.nsqd_connections - 1));
-      Logs_lwt.debug ( fun l -> l "%s %d connections" c.log_prefix c.nsqd_connections) >>= fun () ->
+      c.open_connections <- (max 0 (c.open_connections - 1));
+      Logs_lwt.debug ( fun l -> l "%s %d connections" c.log_prefix c.open_connections) >>= fun () ->
       main_loop c address mbox
     | Error e ->
       Logs_lwt.err (fun l -> l "%s Connecting to consumer '%s': %s" c.log_prefix (Address.to_string address) e) >>= fun () ->
