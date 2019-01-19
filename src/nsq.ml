@@ -753,7 +753,7 @@ module Consumer = struct
 
 
   let rec read_loop ~timeout conn mbox =
-    let put_async m = Lwt.async @@ fun () -> Lwt_mvar.put mbox m in
+    let put_async m = async @@ fun () -> Lwt_mvar.put mbox m in
     catch_result1 (read_raw_frame ~timeout) conn >>= function
     | Ok raw ->
       put_async @@ RawFrame raw;
@@ -805,7 +805,7 @@ module Consumer = struct
         begin 
           match ServerMessage.of_raw_frame raw with
           | Ok server_message ->
-            Lwt.async 
+            async 
               begin
                 fun () -> 
                   handle_server_message server_message c.handler c.config.max_attempts >>= function
@@ -846,7 +846,7 @@ module Consumer = struct
     Logs_lwt.debug (fun l -> l "%s Sending initial RDY 1" c.log_prefix) >>= fun () ->
     send (RDY 1) >>= fun () ->
     (* Start background reader *)
-    Lwt.async (fun () -> read_loop ~timeout:c.config.read_timeout conn mbox);
+    async (fun () -> read_loop ~timeout:c.config.read_timeout conn mbox);
     let initial_state = { position = HalfOpen; error_count = 0; } in
     mbox_loop initial_state
 
@@ -942,7 +942,7 @@ module Consumer = struct
       start_polling_lookupd c c.addresses
     | ModeNsqd ->
       let consumers = List.map ~f:(fun a -> start_nsqd_consumer c a) c.addresses in
-      Lwt.join consumers
+      join consumers
 
 end
 
@@ -978,7 +978,7 @@ module Producer = struct
     let check _ is_ok = is_ok false in
     let dispose c =
       Logs_lwt.warn (fun l -> l "Error publishing, closing connection") >>= fun () ->
-      Lwt.join [(Lwt_io.close (fst c.conn));(Lwt_io.close (snd c.conn))]
+      join [(Lwt_io.close (fst c.conn));(Lwt_io.close (snd c.conn))]
     in
     Lwt_pool.create size ~validate ~check ~dispose
       begin
