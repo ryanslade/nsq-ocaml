@@ -360,7 +360,7 @@ let catch_result promise =
   try_bind 
     promise
     (fun x -> return_ok x)
-    (fun e -> return_error e)
+    (fun e -> return_error (Exn.to_string e))
 
 let catch_result1 f x =
   catch_result (fun () -> f x)
@@ -706,7 +706,7 @@ module Consumer = struct
     | RawFrame of raw_frame
     | Command of command
     | TrialBreaker
-    | ConnectionError of exn
+    | ConnectionError of string
     | RecalcRDY
 
   let handle_message handler msg max_attempts =
@@ -719,8 +719,8 @@ module Consumer = struct
     begin
       function
       | Ok r -> return r
-      | Error e ->
-        Logs_lwt.err (fun l -> l "Handler error: %s" (Exn.to_string e)) >>= fun () ->
+      | Error s ->
+        Logs_lwt.err (fun l -> l "Handler error: %s" s) >>= fun () ->
         return HandlerRequeue
     end
     >>= function
@@ -758,8 +758,8 @@ module Consumer = struct
     | Ok raw ->
       put_async @@ RawFrame raw;
       read_loop ~timeout conn mbox
-    | Error e ->
-      put_async @@ ConnectionError e;
+    | Error s ->
+      put_async @@ ConnectionError s;
       return_unit
 
   let open_breaker c conn mbox bs =
@@ -825,8 +825,8 @@ module Consumer = struct
         let bs = { bs with position = HalfOpen } in
         send (RDY 1) >>=  fun () ->
         mbox_loop bs
-      | ConnectionError e ->
-        fail e 
+      | ConnectionError s ->
+        fail_with s
       | RecalcRDY ->
         (* Only recalc and send if breaker is closed  *)
         match bs.position with
@@ -868,35 +868,34 @@ module Consumer = struct
       Logs_lwt.debug ( fun l -> l "%s %d connections" c.log_prefix c.nsqd_connections) >>= fun () ->
       main_loop c address mbox
     | Error e ->
-      Logs_lwt.err (fun l -> l "%s Connecting to consumer '%s': %s" c.log_prefix (Address.to_string address) (Exn.to_string e)) >>= fun () ->
+      Logs_lwt.err (fun l -> l "%s Connecting to consumer '%s': %s" c.log_prefix (Address.to_string address) e) >>= fun () ->
       Lwt_unix.sleep default_backoff_seconds >>= fun () ->
       main_loop c address mbox
 
   let async_exception_hook e =
     Logs.err (fun l -> l "Async exception: %s" (Exn.to_string e))
 
+  (** 
+           Start an async thread to update RDY count occasionaly.
+           The number of open connections can change as we add new consumers due to lookupd
+           discovering producers or we have connection failures. Each time a new connection 
+           is opened or closed the consumer.nsqd_connections field is updated.
+           We therefore need to occasionaly update our RDY count as this may have changed so that
+           it is spread evenly across connections.
+  *)
+  let start_background_ready_calculator c mbox =
+    let jitter = Random.float (recalculate_rdy_interval /. 10.0) in
+    let interval = recalculate_rdy_interval +. jitter in
+    let rec loop () =
+      Lwt_unix.sleep interval >>= fun () ->
+      Logs_lwt.debug ( fun l -> l "%s recalculating RDY" c.log_prefix) >>= fun () ->
+      Lwt_mvar.put mbox RecalcRDY >>= loop
+    in
+    async loop
+
   let start_nsqd_consumer c address =
     let mbox = Lwt_mvar.create_empty () in
-    async 
-      (** 
-         Start an async thread to update RDY count occasionaly.
-         The number of open connections can change as we add new consumers due to lookupd
-         discovering producers or we have connection failures. Each time a new connection 
-         is opened or closed the consumer.nsqd_connections field is updated.
-         We therefore need to occasionaly update our RDY count as this may have changed so that
-         it is spread evenly across connections.
-      *)
-      begin
-        fun () ->
-          let jitter = Random.float (recalculate_rdy_interval /. 10.0) in
-          let interval = recalculate_rdy_interval +. jitter in
-          let rec loop () =
-            Lwt_unix.sleep interval >>= fun () ->
-            Logs_lwt.debug ( fun l -> l "%s recalculating RDY" c.log_prefix) >>= fun () ->
-            Lwt_mvar.put mbox RecalcRDY >>= loop
-          in
-          loop ()
-      end;
+    start_background_ready_calculator c mbox;
     main_loop c address mbox
 
   let start_polling_lookupd c lookup_addresses =
