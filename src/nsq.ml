@@ -701,9 +701,12 @@ module Consumer = struct
     then 1
     else c.config.max_in_flight / c.open_connections
 
-  let do_after duration f =
-    Logs_lwt.debug (fun l -> l "Sleeping for %f seconds" (Seconds.value duration)) >>= fun () ->
-    Lwt_unix.sleep (Seconds.value duration) >>= f
+  let do_after_async ~duration f =
+    async
+      begin fun () ->
+        Logs_lwt.debug (fun l -> l "Sleeping for %f seconds" (Seconds.value duration)) >>= fun () ->
+        Lwt_unix.sleep (Seconds.value duration) >>= f
+      end
 
   type loop_message =
     | RawFrame of raw_frame
@@ -777,7 +780,7 @@ module Consumer = struct
       send ~timeout:c.config.write_timeout ~conn (RDY 0) >>= fun () ->
       let bs = { bs with position = Open } in
       let duration = backoff_duration ~multiplier:c.config.backoff_multiplier ~error_count:bs.error_count in
-      async (fun () -> do_after duration (fun () -> Lwt_mvar.put mbox TrialBreaker));
+      do_after_async ~duration (fun () -> Lwt_mvar.put mbox TrialBreaker);
       return bs
 
   let update_breaker_state c conn open_breaker cmd bs =
