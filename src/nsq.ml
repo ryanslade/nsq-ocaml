@@ -530,6 +530,7 @@ module Consumer = struct
       max_in_flight : int;
       max_attempts : int;
       backoff_multiplier : float;
+      error_threshold : int; (* After how many errors do we send RDY 0 and back off *)
 
       (* network timeouts in seconds *)
       dial_timeout : Seconds.t;
@@ -574,6 +575,7 @@ module Consumer = struct
         ?(max_in_flight = 1)
         ?(max_attempts = 5)
         ?(backoff_multiplier = 0.5)
+        ?(error_threshold = 1)
         ?(dial_timeout = Seconds.of_float 1.0)
         ?(read_timeout = Seconds.of_float 60.0)
         ?(write_timeout = Seconds.of_float 1.0)
@@ -594,6 +596,7 @@ module Consumer = struct
         max_in_flight;
         max_attempts;
         backoff_multiplier;
+        error_threshold;
         dial_timeout;
         read_timeout;
         write_timeout;
@@ -751,7 +754,6 @@ module Consumer = struct
     | ErrorTOUCHFailed s -> warn_return_none "ErrorTOUCHFailed" s 
     | Message msg -> handle_message handler msg max_attempts >>= fun cmd -> return_some cmd
 
-
   let rec read_loop ~timeout conn mbox =
     let put_async m = async @@ fun () -> Lwt_mvar.put mbox m in
     catch_result1 (read_raw_frame ~timeout) conn >>= function
@@ -762,14 +764,21 @@ module Consumer = struct
       put_async @@ ConnectionError s;
       return_unit
 
-  let open_breaker c conn mbox bs =
-    (* Send RDY 0 and send retry trial command after a delay  *)
-    Logs_lwt.debug (fun l -> l "Breaker open, sending RDY 0") >>= fun () ->
-    send ~timeout:c.config.write_timeout ~conn (RDY 0) >|= fun () ->
-    let bs = { error_count = bs.error_count + 1; position = Open } in
-    let duration = backoff_duration ~multiplier:c.config.backoff_multiplier ~error_count:bs.error_count in
-    async (fun () -> do_after duration (fun () -> Lwt_mvar.put mbox TrialBreaker));
-    bs
+  let maybe_open_breaker c conn mbox bs =
+    let bs = { bs with error_count = bs.error_count + 1 } in
+    Logs_lwt.warn (fun l -> l "Handler returned error, count %d" bs.error_count) >>= fun () ->
+    if bs.error_count < c.config.error_threshold
+    then
+      return bs
+    else
+      Logs_lwt.warn (fun l -> l "Error threshold exceeded (%d of %d)" bs.error_count c.config.error_threshold) >>= fun () ->
+      (* Send RDY 0 and send retry trial command after a delay  *)
+      Logs_lwt.debug (fun l -> l "Breaker open, sending RDY 0") >>= fun () ->
+      send ~timeout:c.config.write_timeout ~conn (RDY 0) >>= fun () ->
+      let bs = { bs with position = Open } in
+      let duration = backoff_duration ~multiplier:c.config.backoff_multiplier ~error_count:bs.error_count in
+      async (fun () -> do_after duration (fun () -> Lwt_mvar.put mbox TrialBreaker));
+      return bs
 
   let update_breaker_state c conn open_breaker cmd bs =
     match cmd with
@@ -796,8 +805,8 @@ module Consumer = struct
         return { position = Closed; error_count = 0; }
 
   let consume c conn mbox =
-    let open_breaker = open_breaker c conn mbox in
-    let update_breaker_state = update_breaker_state c conn open_breaker in
+    let maybe_open_breaker = maybe_open_breaker c conn mbox in
+    let update_breaker_state = update_breaker_state c conn maybe_open_breaker in
     let send = send ~timeout:c.config.write_timeout ~conn in
     let rec mbox_loop bs =
       Lwt_mvar.take mbox >>= function

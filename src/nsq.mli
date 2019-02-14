@@ -56,6 +56,7 @@ module Consumer : sig
       ?max_in_flight:int
       -> ?max_attempts:int
       -> ?backoff_multiplier:float
+      -> ?error_threshold:int
       -> ?dial_timeout:Seconds.t
       -> ?read_timeout:Seconds.t
       -> ?write_timeout:Seconds.t
