@@ -1,3 +1,18 @@
+module Seconds : sig
+  type t
+
+  val of_float : float -> t
+  val value : t -> float
+end
+
+module Milliseconds : sig
+  type t
+
+  val of_int64 : int64 -> t
+  val value : t -> int64
+  val of_seconds : Seconds.t -> t
+end
+
 module Address : sig
   type t =
     | Host of string
@@ -26,10 +41,6 @@ module Topic : sig
   val to_string : t -> string
 end
 
-type handler_result =
-  | HandlerOK
-  | HandlerRequeue
-
 module Producer : sig
   type t
   val create : ?pool_size:int -> Address.t -> (t, string) result
@@ -38,36 +49,43 @@ module Producer : sig
 end
 
 module Consumer : sig
+  module Config : sig
+    type t
+
+    val create :
+      ?max_in_flight:int
+      -> ?max_attempts:int
+      -> ?backoff_multiplier:float
+      -> ?error_threshold:int
+      -> ?dial_timeout:Seconds.t
+      -> ?read_timeout:Seconds.t
+      -> ?write_timeout:Seconds.t
+      -> ?lookupd_poll_interval:Seconds.t
+      -> ?lookupd_poll_jitter:float
+      -> ?heartbeat_interval:Seconds.t
+      -> ?max_requeue_delay:Seconds.t
+      -> ?default_requeue_delay:Seconds.t
+      -> ?client_id:string
+      -> ?hostname:string
+      -> ?user_agent:string
+      -> ?output_buffer_size:int
+      -> ?output_buffer_timeout:Seconds.t
+      -> ?sample_rate : int
+      -> unit
+      -> (t, string) result
+  end
+
   type t
-
-  type config
-
-  val create_config :
-    ?max_in_flight:int
-    -> ?max_attempts:int
-    -> ?backoff_multiplier:float
-    -> ?dial_timeout:float
-    -> ?read_timeout:float
-    -> ?write_timeout:float
-    -> ?lookupd_poll_interval:float
-    -> ?lookupd_poll_jitter:float
-    -> ?heartbeat_interval:float
-    -> ?max_requeue_delay:float
-    -> ?default_requeue_delay:float
-    -> ?client_id:string
-    -> ?hostname:string
-    -> ?user_agent:string
-    -> ?output_buffer_size:int
-    -> ?output_buffer_timeout:float
-    -> ?sample_rate : int
-    -> unit
-    -> (config, string) result
 
   type mode =
     | ModeNsqd
     | ModeLookupd
 
-  val create : ?mode:mode -> ?config:config -> Address.t list -> Topic.t -> Channel.t -> (bytes -> handler_result Lwt.t) -> t
+  type handler_result =
+    | HandlerOK
+    | HandlerRequeue
+
+  val create : ?mode:mode -> ?config:Config.t -> Address.t list -> Topic.t -> Channel.t -> (bytes -> handler_result Lwt.t) -> t
   val run : t -> unit Lwt.t
 end
 
