@@ -1,7 +1,7 @@
 open Base
 open Lwt
 
-let client_version = "0.3"
+let client_version = "0.4"
 let ephemeral_suffix = "#ephemeral"
 let default_backoff_seconds = 1.0
 let max_backoff_seconds = 3600.0
