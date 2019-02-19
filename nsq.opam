@@ -24,5 +24,6 @@ depends: [
   "ppx_sexp_conv"
   "ppx_expect"
   "ppx_compare"
+  "ppx_hash"
   "logs"
 ]

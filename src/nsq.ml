@@ -3,7 +3,7 @@ open Lwt
 
 let client_version = "0.4"
 let ephemeral_suffix = "#ephemeral"
-let default_backoff_seconds = 1.0
+let default_backoff_seconds = 5.0
 let max_backoff_seconds = 3600.0
 let default_nsqd_port = 4150
 let default_lookupd_port = 4161
@@ -105,7 +105,7 @@ module Address = struct
     type t =
       | Host of string
       | HostPort of string * int
-    [@@deriving sexp_of, compare]
+    [@@deriving sexp_of, compare, hash]
   end
   include T
   include Comparable.Make(T)
@@ -639,7 +639,7 @@ module Consumer = struct
   type t = {
     addresses : Address.t list;
     (* The number of open NSQD connections *)
-    mutable open_connections : int;
+    open_connections : Address.t Hash_set.t;
     topic : Topic.t;
     channel : Channel.t;
     handler : handler_func;
@@ -685,9 +685,10 @@ module Consumer = struct
       | None -> Config.create () |> Result.ok_or_failwith
       | Some c -> c
     in
+    let open_connections = Hash_set.create (module Address) in
     { 
       addresses;
-      open_connections = 0;
+      open_connections;
       topic; 
       channel; 
       handler;
@@ -697,9 +698,10 @@ module Consumer = struct
     }
 
   let rdy_per_connection c =
-    if c.open_connections = 0 || (c.config.max_in_flight < c.open_connections)
+    let connection_count = Hash_set.length c.open_connections in
+    if connection_count = 0 || (c.config.max_in_flight < connection_count)
     then 1
-    else c.config.max_in_flight / c.open_connections
+    else c.config.max_in_flight / connection_count
 
   let do_after_async ~duration f =
     async
@@ -758,7 +760,7 @@ module Consumer = struct
     | Message msg -> handle_message handler msg max_attempts >>= fun cmd -> return_some cmd
 
   let rec read_loop ~timeout conn mbox =
-    let put_async m = async @@ fun () -> Lwt_mvar.put mbox m in
+    let put_async m = async (fun () -> Lwt_mvar.put mbox m) in
     catch_result1 (read_raw_frame ~timeout) conn >>= function
     | Ok raw ->
       put_async @@ RawFrame raw;
@@ -862,7 +864,7 @@ module Consumer = struct
     let initial_state = { position = HalfOpen; error_count = 0; } in
     mbox_loop initial_state
 
-  let rec main_loop c address mbox =
+  let rec main_loop ?(error_count=0) c address mbox =
     catch_result (fun () -> connect address c.config.dial_timeout) >>= function
     | Ok conn ->
       let handle_ex e = 
@@ -872,17 +874,23 @@ module Consumer = struct
           (Lwt_io.close (snd conn));
           (Lwt_unix.sleep default_backoff_seconds)]
       in
-      c.open_connections <- c.open_connections + 1;
-      Logs_lwt.debug ( fun l -> l "%s %d connections" c.log_prefix c.open_connections) >>= fun () ->
+      Hash_set.add c.open_connections address;
+      Logs_lwt.debug (fun l -> l "%s %d connections" c.log_prefix (Hash_set.length c.open_connections)) >>= fun () ->
       catch (fun () -> consume c conn mbox) handle_ex >>= fun () ->
-      (* If we get here it means that something failed and we need to reconnect *)
-      c.open_connections <- (max 0 (c.open_connections - 1));
-      Logs_lwt.debug ( fun l -> l "%s %d connections" c.log_prefix c.open_connections) >>= fun () ->
-      main_loop c address mbox
+      (** Error consuming.
+          If we get here it means that something failed and we need to reconnect *)
+      Hash_set.remove c.open_connections address;
+      Logs_lwt.debug (fun l -> l "%s %d connections" c.log_prefix (Hash_set.length c.open_connections)) >>= fun () ->
+      let error_count = 1 in
+      main_loop ~error_count c address mbox
     | Error e ->
+      (* Error connecting *)
       Logs_lwt.err (fun l -> l "%s Connecting to consumer '%s': %s" c.log_prefix (Address.to_string address) e) >>= fun () ->
-      Lwt_unix.sleep default_backoff_seconds >>= fun () ->
-      main_loop c address mbox
+      let error_count = error_count + 1 in
+      let duration = backoff_duration ~multiplier:default_backoff_seconds ~error_count in
+      Logs_lwt.debug (fun l -> l "%s Sleeping for %f seconds" c.log_prefix (Seconds.value duration)) >>= fun () ->
+      Lwt_unix.sleep (Seconds.value duration) >>= fun () ->
+      main_loop ~error_count c address mbox
 
   let async_exception_hook e =
     Logs.err (fun l -> l "Async exception: %s" (Exn.to_string e))
@@ -900,7 +908,7 @@ module Consumer = struct
     let interval = recalculate_rdy_interval +. jitter in
     let rec loop () =
       Lwt_unix.sleep interval >>= fun () ->
-      Logs_lwt.debug ( fun l -> l "%s recalculating RDY" c.log_prefix) >>= fun () ->
+      Logs_lwt.debug (fun l -> l "%s recalculating RDY" c.log_prefix) >>= fun () ->
       Lwt_mvar.put mbox RecalcRDY >>= loop
     in
     async loop
