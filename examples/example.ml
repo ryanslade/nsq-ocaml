@@ -2,7 +2,7 @@ open Base
 open Lwt
 open Nsq
 
-let nsqd_address = "172.17.0.2"
+let nsqd_address = "172.17.0.3"
 let lookupd_address = "172.17.0.2"
 
 let make_handler name =
@@ -31,7 +31,7 @@ let create_consumer ~mode chan_name handler =
   let config =
     Consumer.Config.create
       ~max_in_flight:100
-      ~lookupd_poll_interval:(Seconds.of_float 5.0)
+      ~lookupd_poll_interval:(Seconds.of_float 60.0)
       ()
     |> Result.ok_or_failwith
   in

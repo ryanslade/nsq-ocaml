@@ -4,11 +4,12 @@ open Lwt
 let client_version = "0.4"
 let ephemeral_suffix = "#ephemeral"
 let default_backoff_seconds = 5.0
-let max_backoff_seconds = 3600.0
+let max_backoff_seconds = 600.0
 let default_nsqd_port = 4150
 let default_lookupd_port = 4161
 let network_buffer_size = 16 * 1024
 let recalculate_rdy_interval = 60.0
+let lookupd_error_threshold = 5
 
 module Seconds : sig
   type t
@@ -864,7 +865,7 @@ module Consumer = struct
     let initial_state = { position = HalfOpen; error_count = 0; } in
     mbox_loop initial_state
 
-  let rec main_loop ?(error_count=0) c address mbox =
+  let rec main_loop ?(error_count=0) c address ready_calculator mbox =
     catch_result (fun () -> connect address c.config.dial_timeout) >>= function
     | Ok conn ->
       let handle_ex e = 
@@ -882,15 +883,24 @@ module Consumer = struct
       Hash_set.remove c.open_connections address;
       Logs_lwt.debug (fun l -> l "%s %d connections" c.log_prefix (Hash_set.length c.open_connections)) >>= fun () ->
       let error_count = 1 in
-      main_loop ~error_count c address mbox
+      main_loop ~error_count c address ready_calculator mbox
     | Error e ->
       (* Error connecting *)
       Logs_lwt.err (fun l -> l "%s Connecting to consumer '%s': %s" c.log_prefix (Address.to_string address) e) >>= fun () ->
       let error_count = error_count + 1 in
-      let duration = backoff_duration ~multiplier:default_backoff_seconds ~error_count in
-      Logs_lwt.debug (fun l -> l "%s Sleeping for %f seconds" c.log_prefix (Seconds.value duration)) >>= fun () ->
-      Lwt_unix.sleep (Seconds.value duration) >>= fun () ->
-      main_loop ~error_count c address mbox
+      let stop_connecting = match c.mode with
+        | ModeNsqd -> false
+        | ModeLookupd -> error_count > lookupd_error_threshold
+      in
+      if stop_connecting then
+        Logs_lwt.err (fun l -> l "%s Exceeded reconnection threshold (%d), not reconnecting" c.log_prefix error_count) >>= fun () ->
+        Lwt.cancel ready_calculator;
+        return_unit
+      else
+        let duration = backoff_duration ~multiplier:default_backoff_seconds ~error_count in
+        Logs_lwt.debug (fun l -> l "%s Sleeping for %f seconds" c.log_prefix (Seconds.value duration)) >>= fun () ->
+        Lwt_unix.sleep (Seconds.value duration) >>= fun () ->
+        main_loop ~error_count c address ready_calculator mbox
 
   let async_exception_hook e =
     Logs.err (fun l -> l "Async exception: %s" (Exn.to_string e))
@@ -903,7 +913,7 @@ module Consumer = struct
            We therefore need to occasionaly update our RDY count as this may have changed so that
            it is spread evenly across connections.
   *)
-  let start_background_ready_calculator c mbox =
+  let start_ready_calculator c mbox =
     let jitter = Random.float (recalculate_rdy_interval /. 10.0) in
     let interval = recalculate_rdy_interval +. jitter in
     let rec loop () =
@@ -911,16 +921,16 @@ module Consumer = struct
       Logs_lwt.debug (fun l -> l "%s recalculating RDY" c.log_prefix) >>= fun () ->
       Lwt_mvar.put mbox RecalcRDY >>= loop
     in
-    async loop
+    loop ()
 
   let start_nsqd_consumer c address =
     let mbox = Lwt_mvar.create_empty () in
-    start_background_ready_calculator c mbox;
-    main_loop c address mbox
+    let ready_calculator = start_ready_calculator c mbox in
+    main_loop c address ready_calculator mbox
 
   let start_polling_lookupd c lookup_addresses =
     let poll_interval = Float.((1.0 + (Random.float c.config.lookupd_poll_jitter)) * (Seconds.value c.config.lookupd_poll_interval)) in
-    let rec check_for_producers running =
+    let rec check_for_producers () =
       catch
         begin
           fun () ->
@@ -930,11 +940,12 @@ module Consumer = struct
               List.filter_map ~f:Result.ok results
               |> List.map ~f:Lookup.producer_addresses
               |> List.join
-              |> Set.of_list (module Address)
+              |> Hash_set.of_list (module Address)
             in
-            let new_producers = Set.diff discovered_producers running in
-            Logs_lwt.debug (fun l -> l "Found %d new producers" (Set.length new_producers)) >>= fun () ->
-            Set.iter
+            let running = c.open_connections in
+            let new_producers = Hash_set.diff discovered_producers running in
+            Logs_lwt.debug (fun l -> l "Found %d new producers" (Hash_set.length new_producers)) >>= fun () ->
+            Hash_set.iter
               ~f:(
                 fun a ->
                   async (fun () ->
@@ -942,17 +953,16 @@ module Consumer = struct
                       start_nsqd_consumer c a)
               )
               new_producers;
-            let running = Set.union running new_producers in
             Lwt_unix.sleep poll_interval >>= fun () ->
-            check_for_producers running
+            check_for_producers ()
         end
         begin
           fun e ->
             Logs_lwt.err (fun l -> l "Error polling lookupd: %s" (Exn.to_string e)) >>= fun () ->
-            check_for_producers running
+            check_for_producers ()
         end
     in
-    check_for_producers (Set.empty (module Address))
+    check_for_producers ()
 
   let run c =
     Lwt.async_exception_hook := async_exception_hook;
