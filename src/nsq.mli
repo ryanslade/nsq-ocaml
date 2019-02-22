@@ -77,15 +77,7 @@ module Consumer : sig
 
   type t
 
-  type mode =
-    | ModeNsqd
-    | ModeLookupd
-
-  type handler_result =
-    | HandlerOK
-    | HandlerRequeue
-
-  val create : ?mode:mode -> ?config:Config.t -> Address.t list -> Topic.t -> Channel.t -> (bytes -> handler_result Lwt.t) -> t
+  val create : ?mode:[`Nsqd | `Lookupd] -> ?config:Config.t -> Address.t list -> Topic.t -> Channel.t -> (bytes -> [`Ok | `Requeue] Lwt.t) -> t
   val run : t -> unit Lwt.t
 end
 

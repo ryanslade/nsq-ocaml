@@ -627,25 +627,15 @@ module Consumer = struct
 
   end
 
-  type mode =
-    | ModeNsqd
-    | ModeLookupd
-
-  type handler_result =
-    | HandlerOK
-    | HandlerRequeue
-
-  type handler_func = bytes -> handler_result Lwt.t
-
   type t = {
     addresses : Address.t list;
     (* The number of open NSQD connections *)
     open_connections : Address.t Hash_set.t;
     topic : Topic.t;
     channel : Channel.t;
-    handler : handler_func;
+    handler : bytes -> [`Ok | `Requeue] Lwt.t;
     config : Config.t;
-    mode : mode;
+    mode : [`Nsqd | `Lookupd];
     log_prefix : string;
   }
 
@@ -680,7 +670,7 @@ module Consumer = struct
       1 2.000000
       2 3600.000000 |}]
 
-  let create ?(mode=ModeNsqd) ?config addresses topic channel handler =
+  let create ?(mode=`Nsqd) ?config addresses topic channel handler =
     let config = match config with
       (* We're assuming create_config with defaults always returns valid config *)
       | None -> Config.create () |> Result.ok_or_failwith
@@ -730,11 +720,11 @@ module Consumer = struct
       | Ok r -> return r
       | Error s ->
         Logs_lwt.err (fun l -> l "Handler error: %s" s) >>= fun () ->
-        return HandlerRequeue
+        return `Requeue
     end
     >>= function
-    | HandlerOK -> return (FIN msg.id)
-    | HandlerRequeue -> 
+    | `Ok -> return (FIN msg.id)
+    | `Requeue -> 
       let attempts = Unsigned.UInt16.to_int msg.attempts in
       if attempts >= max_attempts
       then 
@@ -889,8 +879,8 @@ module Consumer = struct
       Logs_lwt.err (fun l -> l "%s Connecting to consumer '%s': %s" c.log_prefix (Address.to_string address) e) >>= fun () ->
       let error_count = error_count + 1 in
       let stop_connecting = match c.mode with
-        | ModeNsqd -> false
-        | ModeLookupd -> error_count > lookupd_error_threshold
+        | `Nsqd -> false
+        | `Lookupd -> error_count > lookupd_error_threshold
       in
       if stop_connecting then
         Logs_lwt.err (fun l -> l "%s Exceeded reconnection threshold (%d), not reconnecting" c.log_prefix error_count) >>= fun () ->
@@ -967,10 +957,10 @@ module Consumer = struct
   let run c =
     Lwt.async_exception_hook := async_exception_hook;
     match c.mode with
-    | ModeLookupd ->
+    | `Lookupd ->
       Logs_lwt.debug (fun l -> l "Starting lookupd poll") >>= fun () ->
       start_polling_lookupd c c.addresses
-    | ModeNsqd ->
+    | `Nsqd ->
       let consumers = List.map ~f:(fun a -> start_nsqd_consumer c a) c.addresses in
       join consumers
 
