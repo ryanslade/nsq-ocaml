@@ -1,5 +1,5 @@
 (executables
- (names example consume publish)
+ (names example consume produce)
  (libraries nsq logs logs.fmt fmt.tty))
 
 (install
@@ -7,4 +7,4 @@
   (files 
     (example.exe as example)
     (consume.exe as consume)
-    (publish.exe as publish)))
+    (produce.exe as produce)))

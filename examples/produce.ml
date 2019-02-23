@@ -4,7 +4,7 @@ open Nsq
 
 let nsqd_address = "172.17.0.2"
 let publish_error_backoff = 1.0
-let to_publish = 500000
+let to_publish = 2000000
 let log_interval = 1.0
 let start = ref (Unix.gettimeofday ())
 let published = ref 0

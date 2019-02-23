@@ -2,13 +2,13 @@ open Base
 open Lwt
 open Nsq
 
-let nsqd_address = "172.17.0.2"
+let nsqd_address = "172.17.0.3"
 let lookupd_address = "172.17.0.2"
 
 let make_handler name =
   fun msg ->
   Logs_lwt.debug (fun l -> l "(%s) Handled Body: %s" name (Bytes.to_string msg)) >>= fun () ->
-  return Consumer.HandlerOK
+  return `Ok
 
 let publish_error_backoff = 1.0
 let publish_interval_seconds = 1.0
@@ -31,14 +31,14 @@ let create_consumer ~mode chan_name handler =
   let config =
     Consumer.Config.create
       ~max_in_flight:100
-      ~lookupd_poll_interval:(Seconds.of_float 5.0)
+      ~lookupd_poll_interval:(Seconds.of_float 60.0)
       ()
     |> Result.ok_or_failwith
   in
   let address =
     match mode with
-    | Consumer.ModeNsqd -> nsqd_address
-    | Consumer.ModeLookupd -> lookupd_address
+    | `Nsqd -> nsqd_address
+    | `Lookupd -> lookupd_address
   in
   Consumer.create 
     ~mode
@@ -55,8 +55,8 @@ let setup_logging level =
 
 let () = 
   setup_logging (Some Logs.Debug);
-  let consumer = create_consumer ~mode:Consumer.ModeNsqd  "nsq_consumer" (make_handler "nsq") in
-  let l_consumer = create_consumer ~mode:Consumer.ModeLookupd "lookupd_consumer" (make_handler "lookupd") in
+  let consumer = create_consumer ~mode:`Nsqd  "nsq_consumer" (make_handler "nsq") in
+  let l_consumer = create_consumer ~mode:`Lookupd "lookupd_consumer" (make_handler "lookupd") in
   let running_consumers = List.map ~f:Consumer.run [l_consumer;consumer] in
   let p1 = test_publish () in
   Lwt_main.run @@ join (p1 :: running_consumers)

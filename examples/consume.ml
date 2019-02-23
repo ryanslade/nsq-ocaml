@@ -29,14 +29,14 @@ let setup_logging level =
 
 let handler _ =
   Int.incr consumed;
-  return Consumer.HandlerOK
+  return `Ok
 
 let () = 
   setup_logging (Some Logs.Debug);
   let config = Consumer.Config.create ~max_in_flight:in_flight () |> Result.ok_or_failwith in
   let consumer = 
     Consumer.create
-      ~mode:Consumer.ModeNsqd
+      ~mode:`Nsqd
       ~config
       [(Host nsqd_address)]
       (Topic "Test") 
