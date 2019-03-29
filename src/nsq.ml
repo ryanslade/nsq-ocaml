@@ -191,22 +191,23 @@ module ServerMessage = struct
     Message { timestamp; attempts; id; body; }
 
   let parse_message_body body =
-    try_with_string @@ fun () -> parse_message_body_exn body
+    try_with_string (fun () -> parse_message_body_exn body)
 
   let parse_error_body body =
+    let open Result in
     match String.split ~on:' ' (Bytes.to_string body) with
     | [code; detail] ->
       begin 
         match code with 
-        | "E_INVALID" -> Result.return @@ ErrorInvalid detail
-        | "E_BAD_TOPIC" -> Result.return @@ ErrorBadTopic detail
-        | "E_BAD_CHANNEL" -> Result.return @@ ErrorBadChannel detail
-        | "E_FIN_FAILED" -> Result.return @@ ErrorFINFailed detail
-        | "E_REQ_FAILED" -> Result.return @@ ErrorREQFailed detail
-        | "E_TOUCH_FAILED" -> Result.return @@ ErrorTOUCHFailed detail
-        | _ -> Error (Printf.sprintf "Unknown error code: %s. %s" code detail)
+        | "E_INVALID" -> return (ErrorInvalid detail)
+        | "E_BAD_TOPIC" -> return (ErrorBadTopic detail)
+        | "E_BAD_CHANNEL" -> return (ErrorBadChannel detail)
+        | "E_FIN_FAILED" -> return (ErrorFINFailed detail)
+        | "E_REQ_FAILED" -> return (ErrorREQFailed detail)
+        | "E_TOUCH_FAILED" -> return (ErrorTOUCHFailed detail)
+        | _ -> fail (Printf.sprintf "Unknown error code: %s. %s" code detail)
       end
-    | _ -> Error (Printf.sprintf "Malformed error code: %s" (Bytes.to_string body))
+    | _ -> fail (Printf.sprintf "Malformed error code: %s" (Bytes.to_string body))
 
   let of_raw_frame raw =
     match (FrameType.of_int32 raw.frame_type) with
@@ -271,7 +272,7 @@ let query_nsqlookupd ~topic a =
         match Response.status resp with
         | `OK ->
           Cohttp_lwt.Body.to_string body >>= fun body ->
-          log_and_return "Error parsing lookup response" @@ Lookup.response_of_string body
+          log_and_return "Error parsing lookup response" (Lookup.response_of_string body)
         | status ->
           return_error (Printf.sprintf "Expected %s, got %s" (Code.string_of_status `OK) (Code.string_of_status status))
     end
@@ -283,7 +284,7 @@ let query_nsqlookupd ~topic a =
 
 let bytes_of_pub topic data =
   let buf = Bytes.create 4 in
-  EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int_exn @@ Bytes.length data);
+  EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int_exn (Bytes.length data));
   Printf.sprintf "PUB %s\n%s%s" (Topic.to_string topic) (Bytes.to_string buf) (Bytes.to_string data)
   |> Bytes.of_string
 
@@ -300,12 +301,12 @@ let bytes_of_mpub topic bodies =
   let body_count = List.length bodies in
   let data_size = List.fold_left ~f:(fun a b -> a + Bytes.length b) ~init:0 bodies in
   let buf = Bytes.create (4 + 4 + (4*body_count) + data_size) in
-  EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int_exn @@ data_size);
+  EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int_exn (data_size));
   EndianBytes.BigEndian.set_int32 buf 4 (Int32.of_int_exn body_count);
   let index = ref 8 in
   List.iter ~f:(
     fun b -> 
-      EndianBytes.BigEndian.set_int32 buf !index (Int32.of_int_exn @@ Bytes.length b);
+      EndianBytes.BigEndian.set_int32 buf !index (Int32.of_int_exn (Bytes.length b));
       index := !index + 4;
       Bytes.blit ~src:b ~src_pos:0 ~dst:buf ~dst_pos:!index ~len:(Bytes.length b);
       index := !index + Bytes.length b;
@@ -390,7 +391,7 @@ let send_expect_ok ~read_timeout ~write_timeout ~conn cmd =
   read_raw_frame ~timeout:read_timeout conn >>= fun raw ->
   match ServerMessage.of_raw_frame raw with
   | Ok ResponseOk -> return_unit
-  | Ok sm -> fail_with @@ Printf.sprintf "Expected OK, got %s" (ServerMessage.to_string sm)
+  | Ok sm -> fail_with (Printf.sprintf "Expected OK, got %s" (ServerMessage.to_string sm))
   | Error e -> fail_with (Printf.sprintf "Expected OK, got %s" e)
 
 let subscribe ~read_timeout ~write_timeout ~conn topic channel =
@@ -745,10 +746,10 @@ module Consumer = struct
     let put_async m = async (fun () -> Lwt_mvar.put mbox m) in
     catch_result1 (read_raw_frame ~timeout) conn >>= function
     | Ok raw ->
-      put_async @@ RawFrame raw;
+      put_async (RawFrame raw);
       read_loop ~timeout conn mbox
     | Error s ->
-      put_async @@ ConnectionError s;
+      put_async (ConnectionError s);
       return_unit
 
   let maybe_open_breaker c conn mbox bs =
