@@ -144,10 +144,7 @@ type command =
   | MPUB of Topic.t * Bytes.t list
   | REQ of MessageID.t * Milliseconds.t
   | FIN of MessageID.t
-  | TOUCH of MessageID.t
   | RDY of int
-  | AUTH of string
-  | CLS
   | NOP
 
 let try_with_string f =
@@ -205,6 +202,8 @@ module ServerMessage = struct
         | "E_BAD_TOPIC" -> Result.return @@ ErrorBadTopic detail
         | "E_BAD_CHANNEL" -> Result.return @@ ErrorBadChannel detail
         | "E_FIN_FAILED" -> Result.return @@ ErrorFINFailed detail
+        | "E_REQ_FAILED" -> Result.return @@ ErrorREQFailed detail
+        | "E_TOUCH_FAILED" -> Result.return @@ ErrorTOUCHFailed detail
         | _ -> Error (Printf.sprintf "Unknown error code: %s. %s" code detail)
       end
     | _ -> Error (Printf.sprintf "Malformed error code: %s" (Bytes.to_string body))
@@ -332,18 +331,10 @@ let bytes_of_command = function
   | NOP -> Bytes.of_string "NOP\n"
   | RDY i -> Printf.sprintf "RDY %i\n" i |> Bytes.of_string
   | FIN id -> Printf.sprintf "FIN %s\n" (MessageID.to_string id) |> Bytes.of_string
-  | TOUCH id -> Printf.sprintf "TOUCH %s\n" (MessageID.to_string id) |> Bytes.of_string
   | SUB (t, c) -> Printf.sprintf "SUB %s %s\n" (Topic.to_string t) (Channel.to_string c) |> Bytes.of_string
   | REQ (id, delay) -> Printf.sprintf "REQ %s %Li\n" (MessageID.to_string id) (Milliseconds.value delay) |> Bytes.of_string
   | PUB (t, data) -> bytes_of_pub t data
   | MPUB (t, data) -> bytes_of_mpub t data
-  | CLS -> Bytes.of_string "CLS\n"
-  | AUTH secret -> 
-    let buf = Bytes.create 4 in
-    let length = String.length secret in
-    EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int_exn length);
-    Printf.sprintf "AUTH\n%s%s" (Bytes.to_string buf) secret
-    |> Bytes.of_string
 
 (* Timeout will only apply if > 0.0 *)
 let maybe_timeout ~timeout f =
