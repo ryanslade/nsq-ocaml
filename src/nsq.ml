@@ -892,9 +892,6 @@ module Consumer = struct
         Lwt_unix.sleep (Seconds.value duration) >>= fun () ->
         main_loop ~error_count c address ready_calculator mbox
 
-  let async_exception_hook e =
-    Logs.err (fun l -> l "Async exception: %s" (Exn.to_string e))
-
   (** 
            Start an async thread to update RDY count occasionaly.
            The number of open connections can change as we add new consumers due to lookupd
@@ -955,7 +952,6 @@ module Consumer = struct
     check_for_producers ()
 
   let run c =
-    Lwt.async_exception_hook := async_exception_hook;
     match c.mode with
     | `Lookupd ->
       Logs_lwt.debug (fun l -> l "Starting lookupd poll") >>= fun () ->

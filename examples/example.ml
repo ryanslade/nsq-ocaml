@@ -2,7 +2,7 @@ open Base
 open Lwt
 open Nsq
 
-let nsqd_address = "172.17.0.3"
+let nsqd_address = "172.17.0.2"
 let lookupd_address = "172.17.0.2"
 
 let make_handler name =
