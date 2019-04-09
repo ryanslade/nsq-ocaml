@@ -1,8 +1,8 @@
 build: 
-	dune build --profile release
+	dune build
 
 test:
-	dune runtest --profile release
+	dune runtest
 
 clean:
 	dune clean
