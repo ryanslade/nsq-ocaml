@@ -650,7 +650,7 @@ module Consumer = struct
     let test_cases = [
       ( 1.0, 1 ) ;
       ( 1.0, 2 );
-      ( 2.0, 4000);
+      ( 2.0, 4000 );
     ]
     in
     List.iteri ~f:(fun i (multiplier, error_count) ->
