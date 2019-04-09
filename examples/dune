@@ -4,7 +4,7 @@
 
 (install
  (section bin)
-  (files 
-    (example.exe as example)
-    (consume.exe as consume)
-    (produce.exe as produce)))
+ (files
+  (example.exe as example)
+  (consume.exe as consume)
+  (produce.exe as produce)))

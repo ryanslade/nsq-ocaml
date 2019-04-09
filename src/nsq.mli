@@ -2,6 +2,7 @@ module Seconds : sig
   type t
 
   val of_float : float -> t
+
   val value : t -> float
 end
 
@@ -9,7 +10,9 @@ module Milliseconds : sig
   type t
 
   val of_int64 : int64 -> t
+
   val value : t -> int64
+
   val of_seconds : Seconds.t -> t
 end
 
@@ -19,9 +22,13 @@ module Address : sig
     | HostPort of string * int
 
   val host : string -> t
+
   val host_port : string -> int -> t
+
   val to_string : t -> string
+
   val compare : t -> t -> int
+
   val equal : t -> t -> bool
 end
 
@@ -43,8 +50,11 @@ end
 
 module Producer : sig
   type t
+
   val create : ?pool_size:int -> Address.t -> (t, string) result
+
   val publish : t -> Topic.t -> bytes -> (unit, string) result Lwt.t
+
   val publish_multi : t -> Topic.t -> bytes list -> (unit, string) result Lwt.t
 end
 
@@ -53,7 +63,7 @@ module Consumer : sig
     type t
 
     val create :
-      ?max_in_flight:int
+         ?max_in_flight:int
       -> ?max_attempts:int
       -> ?backoff_multiplier:float
       -> ?error_threshold:int
@@ -70,14 +80,21 @@ module Consumer : sig
       -> ?user_agent:string
       -> ?output_buffer_size:int
       -> ?output_buffer_timeout:Seconds.t
-      -> ?sample_rate : int
+      -> ?sample_rate:int
       -> unit
       -> (t, string) result
   end
 
   type t
 
-  val create : ?mode:[`Nsqd | `Lookupd] -> ?config:Config.t -> Address.t list -> Topic.t -> Channel.t -> (bytes -> [`Ok | `Requeue] Lwt.t) -> t
+  val create :
+       ?mode:[`Nsqd | `Lookupd]
+    -> ?config:Config.t
+    -> Address.t list
+    -> Topic.t
+    -> Channel.t
+    -> (bytes -> [`Ok | `Requeue] Lwt.t)
+    -> t
+
   val run : t -> unit Lwt.t
 end
-
