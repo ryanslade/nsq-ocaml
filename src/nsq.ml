@@ -660,7 +660,7 @@ module Consumer = struct
     [%expect{|
       0 1.000000
       1 2.000000
-      2 3600.000000 |}]
+      2 600.000000 |}]
 
   let create ?(mode=`Nsqd) ?config addresses topic channel handler =
     let config = match config with
