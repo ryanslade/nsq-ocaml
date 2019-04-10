@@ -63,7 +63,7 @@ module Consumer : sig
     type t
 
     val create :
-         ?max_in_flight:int
+      ?max_in_flight:int
       -> ?max_attempts:int
       -> ?backoff_multiplier:float
       -> ?error_threshold:int
@@ -88,7 +88,7 @@ module Consumer : sig
   type t
 
   val create :
-       ?mode:[`Nsqd | `Lookupd]
+    ?mode:[`Nsqd | `Lookupd]
     -> ?config:Config.t
     -> Address.t list
     -> Topic.t

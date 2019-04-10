@@ -22,12 +22,12 @@ let publish p =
     Producer.publish p (Topic "Test") msg
     >>= function
     | Result.Ok _ ->
-        Int.incr published ;
-        if !published >= to_publish then Caml.exit 0 else loop ()
+      Int.incr published ;
+      if !published >= to_publish then Caml.exit 0 else loop ()
     | Result.Error e ->
-        Logs_lwt.err (fun l -> l "%s" e)
-        >>= fun () ->
-        Lwt_unix.sleep publish_error_backoff >>= fun () -> loop ()
+      Logs_lwt.err (fun l -> l "%s" e)
+      >>= fun () ->
+      Lwt_unix.sleep publish_error_backoff >>= fun () -> loop ()
   in
   loop ()
 

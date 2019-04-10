@@ -23,10 +23,10 @@ let test_publish () =
     Producer.publish p (Topic "Test") msg
     >>= function
     | Result.Ok _ ->
-        Lwt_unix.sleep publish_interval_seconds >>= loop
+      Lwt_unix.sleep publish_interval_seconds >>= loop
     | Result.Error e ->
-        Logs_lwt.err (fun l -> l "%s" e)
-        >>= fun () -> Lwt_unix.sleep publish_error_backoff >>= loop
+      Logs_lwt.err (fun l -> l "%s" e)
+      >>= fun () -> Lwt_unix.sleep publish_error_backoff >>= loop
   in
   loop ()
 
