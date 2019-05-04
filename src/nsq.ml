@@ -19,13 +19,7 @@ let recalculate_rdy_interval = 60.0
 
 let lookupd_error_threshold = 5
 
-module Seconds : sig
-  type t
-
-  val of_float : float -> t
-
-  val value : t -> float
-end = struct
+module Seconds = struct
   type t = float [@@deriving yojson]
 
   let of_float f = f
@@ -33,15 +27,7 @@ end = struct
   let value s = s
 end
 
-module Milliseconds : sig
-  type t [@@deriving yojson]
-
-  val of_int64 : int64 -> t
-
-  val value : t -> int64
-
-  val of_seconds : Seconds.t -> t
-end = struct
+module Milliseconds = struct
   type t = int64 [@@deriving yojson]
 
   let of_int64 i = i
