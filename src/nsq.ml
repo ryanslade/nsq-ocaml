@@ -1,7 +1,7 @@
 open Base
 open Lwt
 
-let client_version = "0.5"
+let client_version = "0.5.1"
 
 let ephemeral_suffix = "#ephemeral"
 

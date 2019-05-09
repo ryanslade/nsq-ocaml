@@ -1,5 +1,6 @@
 (library
  (name nsq)
+ (public_name nsq)
  (inline_tests
   (flags (-show-counts)))
  (preprocess
