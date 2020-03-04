@@ -20,13 +20,11 @@ let test_publish () =
     let msg = Unix.gettimeofday () |> Float.to_string |> Bytes.of_string in
     Logs_lwt.debug (fun l -> l "Publishing: %s" (Bytes.to_string msg))
     >>= fun () ->
-    Producer.publish p (Topic "Test") msg
-    >>= function
-    | Result.Ok _ ->
-      Lwt_unix.sleep publish_interval_seconds >>= loop
+    Producer.publish p (Topic "Test") msg >>= function
+    | Result.Ok _ -> Lwt_unix.sleep publish_interval_seconds >>= loop
     | Result.Error e ->
-      Logs_lwt.err (fun l -> l "%s" e)
-      >>= fun () -> Lwt_unix.sleep publish_error_backoff >>= loop
+        Logs_lwt.err (fun l -> l "%s" e) >>= fun () ->
+        Lwt_unix.sleep publish_error_backoff >>= loop
   in
   loop ()
 
@@ -39,22 +37,22 @@ let create_consumer ~mode chan_name handler =
   let address =
     match mode with `Nsqd -> nsqd_address | `Lookupd -> lookupd_address
   in
-  Consumer.create ~mode ~config [Host address] (Topic "Test")
+  Consumer.create ~mode ~config [ Host address ] (Topic "Test")
     (Channel chan_name) handler
 
 let setup_logging level =
-  Logs.set_level level ;
-  Fmt_tty.setup_std_outputs () ;
+  Logs.set_level level;
+  Fmt_tty.setup_std_outputs ();
   Logs.set_reporter (Logs_fmt.reporter ())
 
 let () =
-  setup_logging (Some Logs.Debug) ;
+  setup_logging (Some Logs.Debug);
   let consumer =
     create_consumer ~mode:`Nsqd "nsq_consumer" (make_handler "nsq")
   in
   let l_consumer =
     create_consumer ~mode:`Lookupd "lookupd_consumer" (make_handler "lookupd")
   in
-  let running_consumers = List.map ~f:Consumer.run [l_consumer; consumer] in
+  let running_consumers = List.map ~f:Consumer.run [ l_consumer; consumer ] in
   let p1 = test_publish () in
   Lwt_main.run @@ join (p1 :: running_consumers)
