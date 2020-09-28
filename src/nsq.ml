@@ -263,6 +263,16 @@ let bytes_of_pub topic data =
     (Bytes.to_string data)
   |> Bytes.of_string
 
+let%expect_test "bytes_of_pub" =
+  let topic = Topic.Topic "TestTopic" in
+  let data = Bytes.of_string "Hello World" in
+  bytes_of_pub topic data |> Hex.of_bytes |> Hex.hexdump ~print_chars:false;
+  [%expect
+    {|
+        00000000: 5055 4220 5465 7374 546f 7069 630a 0000
+        00000001: 000b 4865 6c6c 6f20 576f 726c 64
+      |}]
+
 (** 
    MPUB <topic_name>\n
    [ 4-byte body size ]
@@ -293,6 +303,20 @@ let bytes_of_mpub topic bodies =
   Printf.sprintf "MPUB %s\n%s" (Topic.to_string topic) (Bytes.to_string buf)
   |> Bytes.of_string
 
+let%expect_test "bytes_of_mpub" =
+  let topic = Topic.Topic "TestTopic" in
+  let bodies =
+    [ Bytes.of_string "Hello world"; Bytes.of_string "Hello again" ]
+  in
+  bytes_of_mpub topic bodies |> Hex.of_bytes |> Hex.hexdump ~print_chars:false;
+  [%expect
+    {|
+        00000000: 4d50 5542 2054 6573 7454 6f70 6963 0a00
+        00000001: 0000 1600 0000 0200 0000 0b48 656c 6c6f
+        00000002: 2077 6f72 6c64 0000 000b 4865 6c6c 6f20
+        00000003: 6167 6169 6e
+      |}]
+
 (**
    IDENTIFY\n
    [ 4-byte size in bytes ][ N-byte JSON data ]
@@ -320,6 +344,29 @@ let bytes_of_command = function
       |> Bytes.of_string
   | PUB (t, data) -> bytes_of_pub t data
   | MPUB (t, data) -> bytes_of_mpub t data
+
+let%expect_test "bytes_of_command" =
+  let commands =
+    [
+      MAGIC;
+      NOP;
+      RDY 10;
+      FIN (MessageID.of_bytes (Bytes.of_string "ABC"));
+      REQ (MessageID.of_bytes (Bytes.of_string "ABC"), 100L);
+    ]
+  in
+  List.iter
+    ~f:(fun c ->
+      bytes_of_command c |> Hex.of_bytes |> Hex.hexdump ~print_chars:false)
+    commands;
+  [%expect
+    {|
+        00000000: 2020 5632
+        00000000: 4e4f 500a
+        00000000: 5244 5920 3130 0a
+        00000000: 4649 4e20 4142 430a
+        00000000: 5245 5120 4142 4320 3130 300a
+      |}]
 
 (* Timeout will only apply if > 0.0 *)
 let maybe_timeout ~timeout f =
