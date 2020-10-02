@@ -695,12 +695,14 @@ module Consumer = struct
     List.iteri
       ~f:(fun i (multiplier, error_count) ->
         let r = backoff_duration ~multiplier ~error_count in
-        Stdio.print_endline (Printf.sprintf "%d %f" i (Seconds.value r)))
+        Stdio.print_endline
+          (Printf.sprintf "Case %d: Backoff = %f" i (Seconds.value r)))
       test_cases;
-    [%expect {|
-      0 1.000000
-      1 2.000000
-      2 600.000000 |}]
+    [%expect
+      {|
+      Case 0: Backoff = 1.000000
+      Case 1: Backoff = 2.000000
+      Case 2: Backoff = 600.000000 |}]
 
   let create ?(mode = `Nsqd) ?config addresses topic channel handler =
     let config =
