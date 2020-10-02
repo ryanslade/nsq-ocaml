@@ -1016,14 +1016,15 @@ module Consumer = struct
         (fun e ->
           Logs_lwt.err (fun l ->
               l "Error polling lookupd: %s" (Exn.to_string e))
-          >>= fun () -> check_for_producers ())
+          >>= fun () ->
+          Lwt_unix.sleep default_backoff >>= fun () -> check_for_producers ())
     in
     check_for_producers ()
 
   let run c =
     match c.mode with
     | `Lookupd ->
-        Logs_lwt.debug (fun l -> l "Starting lookupd poll") >>= fun () ->
+        Logs_lwt.debug (fun l -> l "Starting lookupd poller") >>= fun () ->
         start_polling_lookupd c c.addresses
     | `Nsqd ->
         let consumers =
