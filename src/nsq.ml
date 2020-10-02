@@ -822,16 +822,16 @@ module Consumer = struct
     match cmd with
     | NOP -> return bs (* Receiving a NOP should not alter our state  *)
     | _ -> (
-        let is_error = match cmd with REQ _ -> true | _ -> false in
-        match (is_error, bs.position) with
-        | true, Closed -> open_breaker bs
-        | true, Open -> return bs
-        | true, HalfOpen ->
+        let error_state = match cmd with REQ _ -> `Error | _ -> `Ok in
+        match (error_state, bs.position) with
+        | `Error, Closed -> open_breaker bs
+        | `Error, Open -> return bs
+        | `Error, HalfOpen ->
             (* Failed test *)
             open_breaker bs
-        | false, Closed -> return bs
-        | false, Open -> return bs
-        | false, HalfOpen ->
+        | `Ok, Closed -> return bs
+        | `Ok, Open -> return bs
+        | `Ok, HalfOpen ->
             (* Passed test  *)
             let rdy = rdy_per_connection c in
             Logs_lwt.debug (fun l ->
