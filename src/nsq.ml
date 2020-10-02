@@ -3,19 +3,11 @@ open Lwt
 
 let client_version = "0.5.1"
 
-let ephemeral_suffix = "#ephemeral"
-
-let default_backoff_seconds = 5.0
-
-let max_backoff_seconds = 600.0
-
 let default_nsqd_port = 4150
 
 let default_lookupd_port = 4161
 
 let network_buffer_size = 16 * 1024
-
-let recalculate_rdy_interval = 60.0
 
 let lookupd_error_threshold = 5
 
@@ -26,6 +18,12 @@ module Seconds = struct
 
   let value s = s
 end
+
+let recalculate_rdy_interval = Seconds.of_float 60.0
+
+let default_backoff = Seconds.of_float 5.0
+
+let max_backoff = Seconds.of_float 600.0
 
 module Milliseconds = struct
   type t = int64 [@@deriving yojson]
@@ -47,18 +45,34 @@ module MessageID = struct
   let to_string = function MessageID id -> Bytes.to_string id
 end
 
-let ephemeral s = s ^ ephemeral_suffix
+let ephemeral s = s ^ "#ephemeral"
 
 module Topic = struct
   type t = Topic of string | TopicEphemeral of string
 
   let to_string = function Topic s -> s | TopicEphemeral s -> ephemeral s
+
+  let%expect_test "to_string" =
+    List.iter
+      ~f:(fun h -> to_string h |> Stdio.print_endline)
+      [ Topic "topic"; TopicEphemeral "topic" ];
+    [%expect {|
+    topic
+    topic#ephemeral |}]
 end
 
 module Channel = struct
   type t = Channel of string | ChannelEphemeral of string
 
   let to_string = function Channel s -> s | ChannelEphemeral s -> ephemeral s
+
+  let%expect_test "to_string" =
+    List.iter
+      ~f:(fun h -> to_string h |> Stdio.print_endline)
+      [ Channel "chan"; ChannelEphemeral "chan" ];
+    [%expect {|
+    chan
+    chan#ephemeral |}]
 end
 
 module FrameType = struct
@@ -95,6 +109,14 @@ module Address = struct
 
   let to_string a =
     match a with Host a -> a | HostPort (a, p) -> Printf.sprintf "%s:%d" a p
+
+  let%expect_test "to_string" =
+    List.iter
+      ~f:(fun h -> to_string h |> Stdio.print_endline)
+      [ Host "example.com"; HostPort ("example.com", 123) ];
+    [%expect {|
+      example.com
+      example.com:123 |}]
 end
 
 module IdentifyConfig = struct
@@ -666,7 +688,7 @@ module Consumer = struct
 
   let backoff_duration ~multiplier ~error_count =
     let bo = multiplier *. Float.of_int error_count in
-    Float.min bo max_backoff_seconds |> Seconds.of_float
+    Float.min bo max_backoff |> Seconds.of_float
 
   let%expect_test "backoff_duration" =
     let test_cases = [ (1.0, 1); (1.0, 2); (2.0, 4000) ] in
@@ -885,7 +907,7 @@ module Consumer = struct
                   l "Consumer connection error: %s" (Exn.to_string e));
               Lwt_io.close (fst conn);
               Lwt_io.close (snd conn);
-              Lwt_unix.sleep default_backoff_seconds;
+              Lwt_unix.sleep default_backoff;
             ]
         in
         Hash_set.add c.open_connections address;
@@ -924,7 +946,7 @@ module Consumer = struct
           return_unit )
         else
           let duration =
-            backoff_duration ~multiplier:default_backoff_seconds ~error_count
+            backoff_duration ~multiplier:default_backoff ~error_count
           in
           Logs_lwt.debug (fun l ->
               l "%s Sleeping for %f seconds" c.log_prefix
