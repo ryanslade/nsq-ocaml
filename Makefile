@@ -2,7 +2,7 @@ build:
 	dune build
 
 test:
-	dune runtest
+	dune test
 
 fmt:
 	dune build @fmt --auto-promote
