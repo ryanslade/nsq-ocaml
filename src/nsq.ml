@@ -451,107 +451,6 @@ let subscribe ~read_timeout ~write_timeout ~conn topic channel =
 let identify ~read_timeout ~write_timeout ~conn ic =
   send_expect_ok ~read_timeout ~write_timeout ~conn (IDENTIFY ic)
 
-module TestHelper = struct
-  let result_printer i r =
-    let r = match r with Ok _ -> "Ok" | Error s -> s in
-    Stdio.print_endline (Printf.sprintf "%d: %s" i r)
-end
-
-module VInt = struct
-  let validate_positive value name c =
-    if Int.is_positive value then Ok c
-    else Error (Printf.sprintf "%s must be greater than 0" name)
-
-  let validate_between ~low ~high value name c =
-    if Int.between ~low ~high value then Ok c
-    else
-      Error
-        (Printf.sprintf "%s must be between %d and %d, got %d" name low high
-           value)
-
-  let result_printer i r =
-    let r = match r with Ok _ -> "Ok" | Error s -> s in
-    Stdio.print_endline (Printf.sprintf "%d: %s" i r)
-
-  let%expect_test "validate_positive" =
-    [ (1, "Field", ()); (0, "Field", ()); (-1, "Field", ()) ]
-    |> List.map ~f:(fun (v, name, c) -> validate_positive v name c)
-    |> List.iteri ~f:result_printer;
-    [%expect
-      {|
-        0: Ok
-        1: Field must be greater than 0
-        2: Field must be greater than 0
-      |}]
-
-  let%expect_test "validate_between" =
-    [
-      (0, 0, 1, "Field", ()); (0, 10, 1, "Field", ()); (0, 10, 11, "Field", ());
-    ]
-    |> List.map ~f:(fun (low, high, v, name, c) ->
-           validate_between ~low ~high v name c)
-    |> List.iteri ~f:result_printer;
-    [%expect
-      {|
-        0: Field must be between 0 and 0, got 1
-        1: Ok
-        2: Field must be between 0 and 10, got 11
-      |}]
-end
-
-module VFloat = struct
-  let validate_positive value name c =
-    if Float.is_positive value then Ok c
-    else Error (Printf.sprintf "%s must be greater than 0" name)
-
-  let validate_between ~low ~high value name c =
-    if Float.between ~low ~high value then Ok c
-    else
-      Error
-        (Printf.sprintf "%s must be between %f and %f, got %f" name low high
-           value)
-
-  let%expect_test "validate_positive" =
-    [ (1.0, "Field", ()); (0.0, "Field", ()); (-1.0, "Field", ()) ]
-    |> List.map ~f:(fun (v, name, c) -> validate_positive v name c)
-    |> List.iteri ~f:TestHelper.result_printer;
-    [%expect
-      {|
-        0: Ok
-        1: Field must be greater than 0
-        2: Field must be greater than 0
-      |}]
-
-  let%expect_test "validate_between" =
-    [
-      (0.0, 0.0, 1.0, "Field", ());
-      (0.0, 10.0, 1.0, "Field", ());
-      (0.0, 10.0, 11.0, "Field", ());
-    ]
-    |> List.map ~f:(fun (low, high, v, name, c) ->
-           validate_between ~low ~high v name c)
-    |> List.iteri ~f:TestHelper.result_printer;
-    [%expect
-      {|
-        0: Field must be between 0.000000 and 0.000000, got 1.000000
-        1: Ok
-        2: Field must be between 0.000000 and 10.000000, got 11.000000
-      |}]
-end
-
-let validate_not_blank s name c =
-  if String.is_empty s then Error (Printf.sprintf "%s can't be blank" name)
-  else Ok c
-
-let%expect_test "validate_not_blank" =
-  [ ("", "Field", ()); ("X", "Field", ()) ]
-  |> List.map ~f:(fun (v, name, c) -> validate_not_blank v name c)
-  |> List.iteri ~f:TestHelper.result_printer;
-  [%expect {|
-        0: Field can't be blank
-        1: Ok
-      |}]
-
 module Consumer = struct
   module Config = struct
     type t = {
@@ -580,45 +479,39 @@ module Consumer = struct
       output_buffer_timeout : Seconds.t;
       sample_rate : int; (* Between 0 and 99 *)
     }
+    [@@deriving fields]
 
-    let validate c =
-      let open Result in
-      VInt.validate_positive c.max_in_flight "max_in_flight" c
-      >>= VInt.validate_between ~low:0 ~high:65535 c.max_attempts "max_attempts"
-      >>= VFloat.validate_positive c.backoff_multiplier "backoff_multiplier"
-      >>= VFloat.validate_between ~low:0.0 ~high:300.0
-            (Seconds.value c.dial_timeout)
-            "dial_timeout"
-      >>= VFloat.validate_between ~low:0.1 ~high:300.0
-            (Seconds.value c.read_timeout)
-            "read_timeout"
-      >>= VFloat.validate_between ~low:0.1 ~high:300.0
-            (Seconds.value c.write_timeout)
-            "write_timeout"
-      >>= VFloat.validate_between ~low:0.1 ~high:300.0
-            (Seconds.value c.lookupd_poll_interval)
-            "lookupd_poll_interval"
-      >>= VFloat.validate_between ~low:0.0 ~high:1.0 c.lookupd_poll_jitter
-            "lookupd_poll_jitter"
-      >>= VFloat.validate_between ~low:0.0 ~high:3600.
-            (Seconds.value c.default_requeue_delay)
-            "default_requeue_delay"
-      >>= VFloat.validate_between ~low:0.0 ~high:3600.
-            (Seconds.value c.max_requeue_delay)
-            "max_requeue_delay"
-      >>= VFloat.validate_between ~low:0.01 ~high:300.0
-            (Seconds.value c.output_buffer_timeout)
-            "output_buffer_timeout"
-      >>= VInt.validate_between ~low:64
-            ~high:(5 * 1025 * 1000)
-            c.output_buffer_size "output_buffer_size"
-      >>= VInt.validate_between ~low:0 ~high:99 c.sample_rate "sample_rate"
-      >>= VFloat.validate_between ~low:1.0 ~high:300.0
-            (Seconds.value c.heartbeat_interval)
-            "heartbeat_interval"
-      >>= validate_not_blank c.client_id "client_id"
-      >>= validate_not_blank c.hostname "hostname"
-      >>= validate_not_blank c.user_agent "user_agent"
+    let validate t =
+      let module V = Validate in
+      let w check = V.field_folder t check in
+      let bound_int ~min ~max =
+        Int.validate_bound ~min:(Maybe_bound.Incl min)
+          ~max:(Maybe_bound.Incl max)
+      in
+      let bound_float ~min ~max =
+        Float.validate_bound ~min:(Maybe_bound.Incl min)
+          ~max:(Maybe_bound.Incl max)
+      in
+      let string_not_blank s = String.is_empty s |> not in
+      V.of_list
+        (Fields.fold ~init:[] ~max_in_flight:(w Int.validate_positive)
+           ~max_attempts:(w (bound_int ~min:0 ~max:65535))
+           ~dial_timeout:(w (bound_float ~min:0.1 ~max:300.0))
+           ~read_timeout:(w (bound_float ~min:0.1 ~max:300.0))
+           ~write_timeout:(w (bound_float ~min:0.1 ~max:300.0))
+           ~lookupd_poll_interval:(w (bound_float ~min:0.1 ~max:300.0))
+           ~default_requeue_delay:(w (bound_float ~min:0.0 ~max:3600.0))
+           ~max_requeue_delay:(w (bound_float ~min:0.0 ~max:3600.0))
+           ~lookupd_poll_jitter:(w (bound_float ~min:0.0 ~max:1.0))
+           ~output_buffer_timeout:(w (bound_float ~min:0.01 ~max:300.0))
+           ~output_buffer_size:(w (bound_int ~min:64 ~max:(5 * 1025 * 1000)))
+           ~sample_rate:(w (bound_int ~min:0 ~max:99))
+           ~heartbeat_interval:(w (bound_float ~min:1.0 ~max:300.0))
+           ~client_id:(w (V.booltest string_not_blank ~if_false:"blank"))
+           ~hostname:(w (V.booltest string_not_blank ~if_false:"blank"))
+           ~user_agent:(w (V.booltest string_not_blank ~if_false:"blank"))
+           ~error_threshold:(w (bound_int ~min:1 ~max:10000))
+           ~backoff_multiplier:(w Float.validate_positive))
 
     let create ?(max_in_flight = 1) ?(max_attempts = 5)
         ?(backoff_multiplier = 0.5) ?(error_threshold = 1)
@@ -634,7 +527,7 @@ module Consumer = struct
         ?(user_agent = Printf.sprintf "nsq-ocaml/%s" client_version)
         ?(output_buffer_size = 16 * 1024)
         ?(output_buffer_timeout = Seconds.of_float 0.25) ?(sample_rate = 0) () =
-      validate
+      let t =
         {
           max_in_flight;
           max_attempts;
@@ -655,6 +548,9 @@ module Consumer = struct
           output_buffer_timeout;
           sample_rate;
         }
+      in
+      Validate.valid_or_error t validate
+      |> Result.map_error ~f:Error.to_string_hum
 
     let to_identity_config c =
       {
