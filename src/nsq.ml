@@ -600,13 +600,9 @@ module Consumer = struct
       Case 1: Backoff = 2.000000
       Case 2: Backoff = 600.000000 |}]
 
-  let create ?(mode = `Nsqd) ?config addresses topic channel handler =
-    let config =
-      match config with
-      (* We're assuming create_config with defaults always returns valid config *)
-      | None -> Config.create () |> Result.ok_or_failwith
-      | Some c -> c
-    in
+  let create ?(mode = `Nsqd)
+      ?(config = Config.create () |> Result.ok_or_failwith) addresses topic
+      channel handler =
     let open_connections = Hash_set.create (module Address) in
     {
       addresses;
@@ -631,13 +627,6 @@ module Consumer = struct
         Logs_lwt.debug (fun l ->
             l "Sleeping for %f seconds" (Seconds.value duration))
         >>= fun () -> Lwt_unix.sleep (Seconds.value duration) >>= f)
-
-  type loop_message =
-    | RawFrame of raw_frame
-    | Command of command
-    | TrialBreaker
-    | ConnectionError of string
-    | RecalcRDY
 
   let handle_message handler msg max_attempts =
     let requeue_delay attempts =
@@ -682,6 +671,13 @@ module Consumer = struct
     | ErrorTOUCHFailed s -> warn_return_none "ErrorTOUCHFailed" s
     | Message msg ->
         handle_message handler msg max_attempts >>= fun cmd -> return_some cmd
+
+  type loop_message =
+    | RawFrame of raw_frame
+    | Command of command
+    | TrialBreaker
+    | ConnectionError of string
+    | RecalcRDY
 
   let rec read_loop ~timeout conn mbox =
     let put_async m = async (fun () -> Lwt_mvar.put mbox m) in
