@@ -101,13 +101,8 @@ type raw_message = {
 }
 
 module Address = struct
-  module T = struct
-    type t = Host of string | HostPort of string * int
-    [@@deriving sexp_of, compare, hash]
-  end
-
-  include T
-  include Comparable.Make (T)
+  type t = Host of string | HostPort of string * int
+  [@@deriving sexp_of, compare, hash, equal]
 
   let host s = Host s
 
