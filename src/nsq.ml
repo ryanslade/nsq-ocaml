@@ -26,11 +26,11 @@ let default_backoff = Seconds.of_float 5.0
 let max_backoff = Seconds.of_float 600.0
 
 module Milliseconds = struct
-  type t = Milliseconds of int64 [@@deriving yojson]
+  type t = int64 [@@deriving yojson]
 
-  let of_int64 i = Milliseconds i
+  let of_int64 i = i
 
-  let value = function Milliseconds m -> m
+  let value i = i
 
   let of_seconds s = Seconds.value s *. 1000.0 |> Int64.of_float |> of_int64
 end
@@ -369,8 +369,7 @@ let%expect_test "bytes_of_command" =
       NOP;
       RDY 10;
       FIN (MessageID.of_bytes (Bytes.of_string "ABC"));
-      REQ
-        (MessageID.of_bytes (Bytes.of_string "ABC"), Milliseconds.of_int64 100L);
+      REQ (MessageID.of_bytes (Bytes.of_string "ABC"), 100L);
     ]
   in
   List.iter
