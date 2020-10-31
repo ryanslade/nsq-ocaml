@@ -2,9 +2,13 @@ open Base
 open Lwt
 open Nsq
 
-let nsqd_address = "172.17.0.2"
+let nsqd_address = "localhost"
 
-let lookupd_address = "172.17.0.2"
+let nsqd_port = 32782
+
+let lookupd_address = "localhost"
+
+let lookupd_port = 32778
 
 let make_handler name msg =
   Logs_lwt.debug (fun l -> l "(%s) Handled Body: %s" name (Bytes.to_string msg))
@@ -15,7 +19,10 @@ let publish_error_backoff = 1.0
 let publish_interval_seconds = 1.0
 
 let test_publish () =
-  let p = Result.ok_or_failwith @@ Producer.create (Host nsqd_address) in
+  let p =
+    Result.ok_or_failwith
+    @@ Producer.create (HostPort (nsqd_address, nsqd_port))
+  in
   let rec loop () =
     let msg = Unix.gettimeofday () |> Float.to_string |> Bytes.of_string in
     Logs_lwt.debug (fun l -> l "Publishing: %s" (Bytes.to_string msg))
@@ -34,11 +41,13 @@ let create_consumer ~mode chan_name handler =
       ~lookupd_poll_interval:(Seconds.of_float 60.0) ()
     |> Result.ok_or_failwith
   in
-  let address =
-    match mode with `Nsqd -> nsqd_address | `Lookupd -> lookupd_address
+  let host_port =
+    match mode with
+    | `Nsqd -> Address.HostPort (nsqd_address, nsqd_port)
+    | `Lookupd -> HostPort (lookupd_address, lookupd_port)
   in
-  Consumer.create ~mode ~config [ Host address ] (Topic "Test")
-    (Channel chan_name) handler
+  Consumer.create ~mode ~config [ host_port ] (Topic "Test") (Channel chan_name)
+    handler
 
 let setup_logging level =
   Logs.set_level level;

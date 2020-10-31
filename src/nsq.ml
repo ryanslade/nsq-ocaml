@@ -1,7 +1,7 @@
 open Base
 open Lwt
 
-let client_version = "0.5.2"
+let client_version = "0.5.3"
 
 let default_nsqd_port = 4150
 
