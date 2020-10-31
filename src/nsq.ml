@@ -12,17 +12,11 @@ let network_buffer_size = 16 * 1024
 let lookupd_error_threshold = 5
 
 module Seconds = struct
-  type t = Seconds of float [@@deriving yojson]
+  type t = float [@@deriving yojson]
 
-  let of_float f = Seconds f
+  let of_float f = f
 
-  let value = function Seconds s -> s
-
-  let validate_bound ~min ~max t =
-    let f = value t in
-    let min = Maybe_bound.map ~f:value min in
-    let max = Maybe_bound.map ~f:value max in
-    Float.validate_bound ~min ~max f
+  let value s = s
 end
 
 let recalculate_rdy_interval = Seconds.of_float 60.0
@@ -485,6 +479,7 @@ module Consumer = struct
 
     let validate t =
       let module V = Validate in
+      let w check = V.field_folder t check in
       let bound_int ~min ~max =
         Int.validate_bound ~min:(Maybe_bound.Incl min)
           ~max:(Maybe_bound.Incl max)
@@ -493,28 +488,21 @@ module Consumer = struct
         Float.validate_bound ~min:(Maybe_bound.Incl min)
           ~max:(Maybe_bound.Incl max)
       in
-      let bound_sec ~min ~max =
-        let min = Seconds.of_float min in
-        let max = Seconds.of_float max in
-        Seconds.validate_bound ~min:(Maybe_bound.Incl min)
-          ~max:(Maybe_bound.Incl max)
-      in
       let string_not_blank s = String.is_empty s |> not in
-      let w check = V.field_folder t check in
       V.of_list
         (Fields.fold ~init:[] ~max_in_flight:(w Int.validate_positive)
            ~max_attempts:(w (bound_int ~min:0 ~max:65535))
-           ~dial_timeout:(w (bound_sec ~min:0.1 ~max:300.0))
-           ~read_timeout:(w (bound_sec ~min:0.1 ~max:300.0))
-           ~write_timeout:(w (bound_sec ~min:0.1 ~max:300.0))
-           ~lookupd_poll_interval:(w (bound_sec ~min:0.1 ~max:300.0))
-           ~default_requeue_delay:(w (bound_sec ~min:0.0 ~max:3600.0))
-           ~max_requeue_delay:(w (bound_sec ~min:0.0 ~max:3600.0))
+           ~dial_timeout:(w (bound_float ~min:0.1 ~max:300.0))
+           ~read_timeout:(w (bound_float ~min:0.1 ~max:300.0))
+           ~write_timeout:(w (bound_float ~min:0.1 ~max:300.0))
+           ~lookupd_poll_interval:(w (bound_float ~min:0.1 ~max:300.0))
+           ~default_requeue_delay:(w (bound_float ~min:0.0 ~max:3600.0))
+           ~max_requeue_delay:(w (bound_float ~min:0.0 ~max:3600.0))
            ~lookupd_poll_jitter:(w (bound_float ~min:0.0 ~max:1.0))
-           ~output_buffer_timeout:(w (bound_sec ~min:0.01 ~max:300.0))
+           ~output_buffer_timeout:(w (bound_float ~min:0.01 ~max:300.0))
            ~output_buffer_size:(w (bound_int ~min:64 ~max:(5 * 1025 * 1000)))
            ~sample_rate:(w (bound_int ~min:0 ~max:99))
-           ~heartbeat_interval:(w (bound_sec ~min:1.0 ~max:300.0))
+           ~heartbeat_interval:(w (bound_float ~min:1.0 ~max:300.0))
            ~client_id:(w (V.booltest string_not_blank ~if_false:"blank"))
            ~hostname:(w (V.booltest string_not_blank ~if_false:"blank"))
            ~user_agent:(w (V.booltest string_not_blank ~if_false:"blank"))
@@ -592,7 +580,7 @@ module Consumer = struct
 
   let backoff_duration ~multiplier ~error_count =
     let bo = multiplier *. Float.of_int error_count in
-    Float.min bo (Seconds.value max_backoff) |> Seconds.of_float
+    Float.min bo max_backoff |> Seconds.of_float
 
   let%expect_test "backoff_duration" =
     let test_cases = [ (1.0, 1); (1.0, 2); (2.0, 4000) ] in
@@ -809,7 +797,7 @@ module Consumer = struct
                   l "Consumer connection error: %s" (Exn.to_string e));
               Lwt_io.close (fst conn);
               Lwt_io.close (snd conn);
-              Lwt_unix.sleep (Seconds.value default_backoff);
+              Lwt_unix.sleep default_backoff;
             ]
         in
         Hash_set.add c.open_connections address;
@@ -848,9 +836,7 @@ module Consumer = struct
           return_unit )
         else
           let duration =
-            backoff_duration
-              ~multiplier:(Seconds.value default_backoff)
-              ~error_count
+            backoff_duration ~multiplier:default_backoff ~error_count
           in
           Logs_lwt.debug (fun l ->
               l "%s Sleeping for %f seconds" c.log_prefix
@@ -868,10 +854,8 @@ module Consumer = struct
            it is spread evenly across connections.
   *)
   let start_ready_calculator c mbox =
-    let jitter =
-      Random.float (Seconds.value recalculate_rdy_interval /. 10.0)
-    in
-    let interval = Seconds.value recalculate_rdy_interval +. jitter in
+    let jitter = Random.float (recalculate_rdy_interval /. 10.0) in
+    let interval = recalculate_rdy_interval +. jitter in
     let rec loop () =
       Lwt_unix.sleep interval >>= fun () ->
       Logs_lwt.debug (fun l -> l "%s recalculating RDY" c.log_prefix)
@@ -921,8 +905,7 @@ module Consumer = struct
           Logs_lwt.err (fun l ->
               l "Error polling lookupd: %s" (Exn.to_string e))
           >>= fun () ->
-          Lwt_unix.sleep (Seconds.value default_backoff) >>= fun () ->
-          check_for_producers ())
+          Lwt_unix.sleep default_backoff >>= fun () -> check_for_producers ())
     in
     check_for_producers ()
 
