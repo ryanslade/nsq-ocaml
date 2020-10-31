@@ -345,6 +345,35 @@ let bytes_of_identify c =
   EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int_exn length);
   Printf.sprintf "IDENTIFY\n%s%s" (Bytes.to_string buf) data |> Bytes.of_string
 
+let%expect_test "bytes_of_identify" =
+  let open IdentifyConfig in
+  let id =
+    {
+      heartbeat_interval = 10L;
+      client_id = "test";
+      hostname = "test";
+      user_agent = "test";
+      output_buffer_size = 100;
+      output_buffer_timeout = 60L;
+      sample_rate = 50;
+    }
+  in
+  bytes_of_identify id |> Hex.of_bytes |> Hex.hexdump ~print_chars:false;
+  [%expect
+    {|
+        00000000: 4944 454e 5449 4659 0a00 0000 977b 2268
+        00000001: 6561 7274 6265 6174 5f69 6e74 6572 7661
+        00000002: 6c22 3a31 302c 2263 6c69 656e 745f 6964
+        00000003: 223a 2274 6573 7422 2c22 686f 7374 6e61
+        00000004: 6d65 223a 2274 6573 7422 2c22 7573 6572
+        00000005: 5f61 6765 6e74 223a 2274 6573 7422 2c22
+        00000006: 6f75 7470 7574 5f62 7566 6665 725f 7369
+        00000007: 7a65 223a 3130 302c 226f 7574 7075 745f
+        00000008: 6275 6666 6572 5f74 696d 656f 7574 223a
+        00000009: 3630 2c22 7361 6d70 6c65 5f72 6174 6522
+        00000010: 3a35 307d
+      |}]
+
 let bytes_of_command = function
   | MAGIC -> Bytes.of_string "  V2"
   | IDENTIFY c -> bytes_of_identify c
