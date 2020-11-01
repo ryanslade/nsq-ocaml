@@ -339,11 +339,16 @@ let%expect_test "bytes_of_mpub" =
    [ 4-byte size in bytes ][ N-byte JSON data ]
 *)
 let bytes_of_identify c =
+  let prefix = "IDENTIFY\n" in
   let buf = Bytes.create 4 in
   let data = IdentifyConfig.to_yojson c |> Yojson.Safe.to_string in
   let length = String.length data in
   EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int_exn length);
-  Printf.sprintf "IDENTIFY\n%s%s" (Bytes.to_string buf) data |> Bytes.of_string
+  let b = Buffer.create (String.length prefix + 4 + length) in
+  Buffer.add_string b prefix;
+  Buffer.add_bytes b buf;
+  Buffer.add_string b data;
+  Buffer.contents_bytes b
 
 let%expect_test "bytes_of_identify" =
   let open IdentifyConfig in
