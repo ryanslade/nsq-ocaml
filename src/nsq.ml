@@ -274,11 +274,19 @@ let query_nsqlookupd ~topic a =
       log_and_return "Querying lookupd" (Error s))
 
 let bytes_of_pub topic data =
+  let prefix = "PUB " in
+  let topic_s = Topic.to_string topic in
+  let data_len = Bytes.length data in
+  let len = 5 + String.length topic_s + 4 + data_len in
   let buf = Bytes.create 4 in
-  EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int_exn (Bytes.length data));
-  Printf.sprintf "PUB %s\n%s%s" (Topic.to_string topic) (Bytes.to_string buf)
-    (Bytes.to_string data)
-  |> Bytes.of_string
+  EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int_exn data_len);
+  let b = Buffer.create len in
+  Buffer.add_string b prefix;
+  Buffer.add_string b topic_s;
+  Buffer.add_string b "\n";
+  Buffer.add_bytes b buf;
+  Buffer.add_bytes b data;
+  Buffer.contents_bytes b
 
 let%expect_test "bytes_of_pub" =
   let topic = Topic.Topic "TestTopic" in
