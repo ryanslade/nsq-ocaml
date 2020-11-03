@@ -273,32 +273,45 @@ let query_nsqlookupd ~topic a =
       let s = Exn.to_string e in
       log_and_return "Querying lookupd" (Error s))
 
-let bytes_of_pub topic data =
+(* PUB <topic_name>\n
+[ 4-byte size in bytes ][ N-byte binary data ]
+
+<topic_name> - a valid string (optionally having #ephemeral suffix) *)
+let bytes_of_pub =
+  (* Preallocate buffers that we can reuse between runs *)
+  let buf = Buffer.create 1024 in
+  let len_buf = Bytes.create 4 in
   let prefix = "PUB " in
-  let topic_s = Topic.to_string topic in
-  let data_len = Bytes.length data in
-  let len = 5 + String.length topic_s + 4 + data_len in
-  let buf = Bytes.create 4 in
-  EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int_exn data_len);
-  let b = Buffer.create len in
-  Buffer.add_string b prefix;
-  Buffer.add_string b topic_s;
-  Buffer.add_string b "\n";
-  Buffer.add_bytes b buf;
-  Buffer.add_bytes b data;
-  Buffer.contents_bytes b
+  fun topic data ->
+    EndianBytes.BigEndian.set_int32 len_buf 0
+      (Int32.of_int_exn (Bytes.length data));
+    Buffer.clear buf;
+    Buffer.add_string buf prefix;
+    Buffer.add_string buf (Topic.to_string topic);
+    Buffer.add_string buf "\n";
+    Buffer.add_bytes buf len_buf;
+    Buffer.add_bytes buf data;
+    (* Return a copy of the data, we're now safe to reuse the above buffers*)
+    Buffer.contents_bytes buf
 
 let%expect_test "bytes_of_pub" =
   let topic = Topic.Topic "TestTopic" in
   let data = Bytes.of_string "Hello World" in
   bytes_of_pub topic data |> Hex.of_bytes |> Hex.hexdump ~print_chars:false;
+  (* Run it twice to ensure our shared buffers don't break anything *)
+  let topic = Topic.Topic "AnotherTopic" in
+  let data = Bytes.of_string "Another message" in
+  bytes_of_pub topic data |> Hex.of_bytes |> Hex.hexdump ~print_chars:false;
   [%expect
     {|
         00000000: 5055 4220 5465 7374 546f 7069 630a 0000
         00000001: 000b 4865 6c6c 6f20 576f 726c 64
+        00000000: 5055 4220 416e 6f74 6865 7254 6f70 6963
+        00000001: 0a00 0000 0f41 6e6f 7468 6572 206d 6573
+        00000002: 7361 6765
       |}]
 
-(** 
+(* 
    MPUB <topic_name>\n
    [ 4-byte body size ]
    [ 4-byte num messages ]
@@ -342,7 +355,7 @@ let%expect_test "bytes_of_mpub" =
         00000003: 6167 6169 6e
       |}]
 
-(**
+(*
    IDENTIFY\n
    [ 4-byte size in bytes ][ N-byte JSON data ]
 *)
