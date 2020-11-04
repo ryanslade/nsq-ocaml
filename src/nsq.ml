@@ -177,13 +177,12 @@ module ServerMessage = struct
     | _ -> Error (Printf.sprintf "Unknown response: %s" body)
 
   let parse_message_body_exn body =
-    let timestamp = EndianBytes.BigEndian.get_int64 body 0 in
-    let attempts =
-      EndianBytes.BigEndian.get_uint16 body 8 |> Unsigned.UInt16.of_int
-    in
+    let open Stdlib in
+    let timestamp = Bytes.get_int64_be body 0 in
+    let attempts = Bytes.get_uint16_be body 8 |> Unsigned.UInt16.of_int in
     let length = Bytes.length body in
-    let id = MessageID.of_bytes (Bytes.sub ~pos:10 ~len:16 body) in
-    let body = Bytes.sub ~pos:26 ~len:(length - 26) body in
+    let id = MessageID.of_bytes (Bytes.sub body 10 16) in
+    let body = Bytes.sub body 26 (length - 26) in
     Message { timestamp; attempts; id; body }
 
   let parse_message_body body =
@@ -273,18 +272,19 @@ let query_nsqlookupd ~topic a =
       let s = Exn.to_string e in
       log_and_return "Querying lookupd" (Error s))
 
-(* PUB <topic_name>\n
-[ 4-byte size in bytes ][ N-byte binary data ]
-
-<topic_name> - a valid string (optionally having #ephemeral suffix) *)
+(* 
+    PUB <topic_name>\n
+    [ 4-byte size in bytes ][ N-byte binary data ]
+    
+    <topic_name> - a valid string (optionally having #ephemeral suffix) 
+*)
 let bytes_of_pub =
   (* Preallocate buffers that we can reuse between runs *)
   let buf = Buffer.create 1024 in
   let len_buf = Bytes.create 4 in
   let prefix = "PUB " in
   fun topic data ->
-    EndianBytes.BigEndian.set_int32 len_buf 0
-      (Int32.of_int_exn (Bytes.length data));
+    Stdlib.Bytes.set_int32_be len_buf 0 (Int32.of_int_exn (Bytes.length data));
     Buffer.clear buf;
     Buffer.add_string buf prefix;
     Buffer.add_string buf (Topic.to_string topic);
@@ -326,13 +326,12 @@ let bytes_of_mpub topic bodies =
     List.fold_left ~f:(fun a b -> a + Bytes.length b) ~init:0 bodies
   in
   let buf = Bytes.create (4 + 4 + (4 * body_count) + data_size) in
-  EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int_exn data_size);
-  EndianBytes.BigEndian.set_int32 buf 4 (Int32.of_int_exn body_count);
+  Stdlib.Bytes.set_int32_be buf 0 (Int32.of_int_exn data_size);
+  Stdlib.Bytes.set_int32_be buf 4 (Int32.of_int_exn body_count);
   let index = ref 8 in
   List.iter
     ~f:(fun b ->
-      EndianBytes.BigEndian.set_int32 buf !index
-        (Int32.of_int_exn (Bytes.length b));
+      Stdlib.Bytes.set_int32_be buf !index (Int32.of_int_exn (Bytes.length b));
       index := !index + 4;
       Bytes.blit ~src:b ~src_pos:0 ~dst:buf ~dst_pos:!index
         ~len:(Bytes.length b);
@@ -364,7 +363,7 @@ let bytes_of_identify c =
   let buf = Bytes.create 4 in
   let data = IdentifyConfig.to_yojson c |> Yojson.Safe.to_string in
   let length = String.length data in
-  EndianBytes.BigEndian.set_int32 buf 0 (Int32.of_int_exn length);
+  Stdlib.Bytes.set_int32_be buf 0 (Int32.of_int_exn length);
   let b = Buffer.create (String.length prefix + 4 + length) in
   Buffer.add_string b prefix;
   Buffer.add_bytes b buf;
@@ -473,7 +472,7 @@ let connect host timeout =
         addr)
 
 let frame_from_bytes bytes =
-  let frame_type = EndianBytes.BigEndian.get_int32 bytes 0 in
+  let frame_type = Stdlib.Bytes.get_int32_be bytes 0 in
   let to_read = Bytes.length bytes - 4 in
   let data = Bytes.sub ~pos:4 ~len:to_read bytes in
   { frame_type; data }

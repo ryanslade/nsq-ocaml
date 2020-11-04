@@ -5,5 +5,5 @@
   (flags (-show-counts)))
  (preprocess
   (pps ppx_deriving_yojson ppx_jane))
- (libraries base stdio lwt ocplib-endian integers lwt.unix cohttp-lwt-unix
-   yojson ppx_deriving_yojson.runtime hex))
+ (libraries base stdio lwt integers lwt.unix cohttp-lwt-unix yojson
+   ppx_deriving_yojson.runtime hex))

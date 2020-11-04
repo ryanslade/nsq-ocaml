@@ -4,11 +4,11 @@ open Nsq
 
 let nsqd_address = "localhost"
 
-let nsqd_port = 32782
+let nsqd_port = 32776
 
 let lookupd_address = "localhost"
 
-let lookupd_port = 32778
+let lookupd_port = 4161
 
 let make_handler name msg =
   Logs_lwt.debug (fun l -> l "(%s) Handled Body: %s" name (Bytes.to_string msg))

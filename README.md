@@ -8,14 +8,15 @@ See examples for a simple example that publishes and subscribes on the same topi
 
 To compile the example program:
 
-*NOTE*: You will need to change the IP address to that of the docker host in example.ml
+_NOTE_: You will need to change the IP address to that of the docker host in example.ml
 
 ```
-opam install containers lwt ocplib-endian integers cohttp-lwt-unix
+opam install base lwt integers cohttp-lwt-unix
 make
 ```
 
 Spin up NSQD using docker:
+
 ```
 docker run nsqio/nsq nsqd
 ```
