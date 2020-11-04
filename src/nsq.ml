@@ -320,25 +320,31 @@ let%expect_test "bytes_of_pub" =
 
    <topic_name> - a valid string (optionally having #ephemeral suffix)
 *)
-let bytes_of_mpub topic bodies =
-  let body_count = List.length bodies in
-  let data_size =
-    List.fold_left ~f:(fun a b -> a + Bytes.length b) ~init:0 bodies
-  in
-  let buf = Bytes.create (4 + 4 + (4 * body_count) + data_size) in
-  Stdlib.Bytes.set_int32_be buf 0 (Int32.of_int_exn data_size);
-  Stdlib.Bytes.set_int32_be buf 4 (Int32.of_int_exn body_count);
-  let index = ref 8 in
-  List.iter
-    ~f:(fun b ->
-      Stdlib.Bytes.set_int32_be buf !index (Int32.of_int_exn (Bytes.length b));
-      index := !index + 4;
-      Bytes.blit ~src:b ~src_pos:0 ~dst:buf ~dst_pos:!index
-        ~len:(Bytes.length b);
-      index := !index + Bytes.length b)
-    bodies;
-  Printf.sprintf "MPUB %s\n%s" (Topic.to_string topic) (Bytes.to_string buf)
-  |> Bytes.of_string
+let bytes_of_mpub =
+  let header = Bytes.create 8 in
+  let size_buf = Bytes.create 4 in
+  let prefix = "MPUB " in
+  fun topic bodies ->
+    let body_size =
+      List.fold_left ~f:(fun a b -> a + Bytes.length b) ~init:0 bodies
+    in
+    let num_messages = List.length bodies in
+    (* 64 is the max topic length allowed *)
+    let b = Buffer.create (6 + 64 + 4 + (4 * num_messages) + body_size) in
+    Buffer.add_string b prefix;
+    Buffer.add_string b (Topic.to_string topic);
+    Buffer.add_string b "\n";
+    Stdlib.Bytes.set_int32_be header 0 (Int32.of_int_exn body_size);
+    Stdlib.Bytes.set_int32_be header 4 (Int32.of_int_exn num_messages);
+    Buffer.add_bytes b header;
+    List.iter
+      ~f:(fun data ->
+        Stdlib.Bytes.set_int32_be size_buf 0
+          (Int32.of_int_exn (Bytes.length data));
+        Buffer.add_bytes b size_buf;
+        Buffer.add_bytes b data)
+      bodies;
+    Buffer.contents_bytes b
 
 let%expect_test "bytes_of_mpub" =
   let topic = Topic.Topic "TestTopic" in
