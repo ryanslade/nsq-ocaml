@@ -2,7 +2,9 @@ open Base
 open Lwt
 open Nsq
 
-let nsqd_address = "172.17.0.2"
+let nsqd_address = "localhost"
+
+let nsqd_port = 32781
 
 let publish_error_backoff = 1.0
 
@@ -49,7 +51,8 @@ let () =
   setup_logging (Some Logs.Debug);
   let p =
     Result.ok_or_failwith
-    @@ Producer.create ~pool_size:concurrency (Host nsqd_address)
+    @@ Producer.create ~pool_size:concurrency
+         (HostPort (nsqd_address, nsqd_port))
   in
   let publishers = List.init ~f:(fun _ -> publish p) concurrency in
   start := Unix.gettimeofday ();
