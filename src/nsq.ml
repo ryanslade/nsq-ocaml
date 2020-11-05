@@ -11,6 +11,9 @@ let network_buffer_size = 16 * 1024
 
 let lookupd_error_threshold = 5
 
+(* Buffer shared between functions that produce packets *)
+let shared_buffer = Buffer.create 1000000
+
 module Seconds = struct
   type t = float [@@deriving yojson]
 
@@ -280,19 +283,17 @@ let query_nsqlookupd ~topic a =
 *)
 let bytes_of_pub =
   (* Preallocate buffers that we can reuse between runs *)
-  let buf = Buffer.create 1024 in
   let len_buf = Bytes.create 4 in
   let prefix = "PUB " in
   fun topic data ->
     Stdlib.Bytes.set_int32_be len_buf 0 (Int32.of_int_exn (Bytes.length data));
-    Buffer.clear buf;
-    Buffer.add_string buf prefix;
-    Buffer.add_string buf (Topic.to_string topic);
-    Buffer.add_string buf "\n";
-    Buffer.add_bytes buf len_buf;
-    Buffer.add_bytes buf data;
-    (* Return a copy of the data, we're now safe to reuse the above buffers*)
-    Buffer.contents_bytes buf
+    Buffer.reset shared_buffer;
+    Buffer.add_string shared_buffer prefix;
+    Buffer.add_string shared_buffer (Topic.to_string topic);
+    Buffer.add_string shared_buffer "\n";
+    Buffer.add_bytes shared_buffer len_buf;
+    Buffer.add_bytes shared_buffer data;
+    Buffer.contents_bytes shared_buffer
 
 let%expect_test "bytes_of_pub" =
   let topic = Topic.Topic "TestTopic" in
@@ -329,22 +330,21 @@ let bytes_of_mpub =
       List.fold_left ~f:(fun a b -> a + Bytes.length b) ~init:0 bodies
     in
     let num_messages = List.length bodies in
-    (* 64 is the max topic length allowed *)
-    let b = Buffer.create (6 + 64 + 4 + (4 * num_messages) + body_size) in
-    Buffer.add_string b prefix;
-    Buffer.add_string b (Topic.to_string topic);
-    Buffer.add_string b "\n";
+    Buffer.reset shared_buffer;
+    Buffer.add_string shared_buffer prefix;
+    Buffer.add_string shared_buffer (Topic.to_string topic);
+    Buffer.add_string shared_buffer "\n";
     Stdlib.Bytes.set_int32_be header 0 (Int32.of_int_exn body_size);
     Stdlib.Bytes.set_int32_be header 4 (Int32.of_int_exn num_messages);
-    Buffer.add_bytes b header;
+    Buffer.add_bytes shared_buffer header;
     List.iter
       ~f:(fun data ->
         Stdlib.Bytes.set_int32_be size_buf 0
           (Int32.of_int_exn (Bytes.length data));
-        Buffer.add_bytes b size_buf;
-        Buffer.add_bytes b data)
+        Buffer.add_bytes shared_buffer size_buf;
+        Buffer.add_bytes shared_buffer data)
       bodies;
-    Buffer.contents_bytes b
+    Buffer.contents_bytes shared_buffer
 
 let%expect_test "bytes_of_mpub" =
   let topic = Topic.Topic "TestTopic" in
@@ -370,11 +370,11 @@ let bytes_of_identify c =
   let data = IdentifyConfig.to_yojson c |> Yojson.Safe.to_string in
   let length = String.length data in
   Stdlib.Bytes.set_int32_be buf 0 (Int32.of_int_exn length);
-  let b = Buffer.create (String.length prefix + 4 + length) in
-  Buffer.add_string b prefix;
-  Buffer.add_bytes b buf;
-  Buffer.add_string b data;
-  Buffer.contents_bytes b
+  Buffer.reset shared_buffer;
+  Buffer.add_string shared_buffer prefix;
+  Buffer.add_bytes shared_buffer buf;
+  Buffer.add_string shared_buffer data;
+  Buffer.contents_bytes shared_buffer
 
 let%expect_test "bytes_of_identify" =
   let open IdentifyConfig in
