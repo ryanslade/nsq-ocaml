@@ -1,5 +1,6 @@
 open Base
 open Lwt
+open Lwt.Syntax
 
 let client_version = "0.5.3"
 
@@ -243,7 +244,8 @@ let log_and_return prefix r =
   match r with
   | Ok _ as ok -> return ok
   | Error s as error ->
-      Logs_lwt.err (fun l -> l "%s: %s" prefix s) >>= fun () -> return error
+      let* () = Logs_lwt.err (fun l -> l "%s: %s" prefix s) in
+      return error
 
 let query_nsqlookupd ~topic a =
   let host, port =
@@ -260,10 +262,10 @@ let query_nsqlookupd ~topic a =
   let open Cohttp in
   catch
     (fun () ->
-      Cohttp_lwt_unix.Client.get uri >>= fun (resp, body) ->
+      let* resp, body = Cohttp_lwt_unix.Client.get uri in
       match Response.status resp with
       | `OK ->
-          Cohttp_lwt.Body.to_string body >>= fun body ->
+          let* body = Cohttp_lwt.Body.to_string body in
           log_and_return "Error parsing lookup response"
             (Lookup.response_of_string body)
       | status ->
@@ -468,7 +470,7 @@ let connect host timeout =
     | Address.Host h -> (h, default_nsqd_port)
     | Address.HostPort (h, p) -> (h, p)
   in
-  Lwt_unix.gethostbyname host >>= fun info ->
+  let* info = Lwt_unix.gethostbyname host in
   let host = Array.random_element_exn info.h_addr_list in
   let addr = Unix.ADDR_INET (host, port) in
   maybe_timeout ~timeout (fun () ->
@@ -484,15 +486,17 @@ let frame_from_bytes bytes =
   { frame_type; data }
 
 let read_raw_frame ~timeout (ic, _) =
-  Lwt_io.BE.read_int32 ic >>= fun size ->
+  let* size = Lwt_io.BE.read_int32 ic in
   let size = Int32.to_int_exn size in
   let bytes = Bytes.create size in
-  maybe_timeout ~timeout (fun () -> Lwt_io.read_into_exactly ic bytes 0 size)
-  >>= fun () -> return (frame_from_bytes bytes)
+  let* () =
+    maybe_timeout ~timeout (fun () -> Lwt_io.read_into_exactly ic bytes 0 size)
+  in
+  return (frame_from_bytes bytes)
 
 let send_expect_ok ~read_timeout ~write_timeout ~conn cmd =
-  send ~timeout:write_timeout ~conn cmd >>= fun () ->
-  read_raw_frame ~timeout:read_timeout conn >>= fun raw ->
+  let* () = send ~timeout:write_timeout ~conn cmd in
+  let* raw = read_raw_frame ~timeout:read_timeout conn in
   match ServerMessage.of_raw_frame raw with
   | Ok ResponseOk -> return_unit
   | Ok sm ->
@@ -679,9 +683,12 @@ module Consumer = struct
 
   let do_after_async ~duration f =
     async (fun () ->
-        Logs_lwt.debug (fun l ->
-            l "Sleeping for %f seconds" (Seconds.value duration))
-        >>= fun () -> Lwt_unix.sleep (Seconds.value duration) >>= f)
+        let* () =
+          Logs_lwt.debug (fun l ->
+              l "Sleeping for %f seconds" (Seconds.value duration))
+        in
+        let* () = Lwt_unix.sleep (Seconds.value duration) in
+        f ())
 
   let handle_message handler msg max_attempts =
     let requeue_delay attempts =
@@ -689,34 +696,40 @@ module Consumer = struct
       let attempts = Int64.of_int_exn attempts in
       Milliseconds.of_int64 Int64.(d * attempts)
     in
-    (catch_result1 handler msg.body >>= function
-     | Ok r -> return r
-     | Error s ->
-         Logs_lwt.err (fun l -> l "Handler error: %s" s) >>= fun () ->
-         return `Requeue)
-    >>= function
+    let* handler_result =
+      let* res = catch_result1 handler msg.body in
+      match res with
+      | Ok r -> return r
+      | Error s ->
+          let* () = Logs_lwt.err (fun l -> l "Handler error: %s" s) in
+          return `Requeue
+    in
+    match handler_result with
     | `Ok -> return (FIN msg.id)
     | `Requeue ->
         let attempts = Unsigned.UInt16.to_int msg.attempts in
         if attempts >= max_attempts then
-          Logs_lwt.warn (fun l ->
-              l "Discarding message %s as reached max attempts, %d"
-                (MessageID.to_string msg.id)
-                attempts)
-          >>= fun () -> return (FIN msg.id)
+          let* () =
+            Logs_lwt.warn (fun l ->
+                l "Discarding message %s as reached max attempts, %d"
+                  (MessageID.to_string msg.id)
+                  attempts)
+          in
+          return (FIN msg.id)
         else
           let delay = requeue_delay attempts in
           return (REQ (msg.id, delay))
 
   let handle_server_message server_message handler max_attempts =
     let warn_return_none name msg =
-      Logs_lwt.warn (fun l -> l "%s: %s" name msg) >>= fun () -> return_none
+      let* () = Logs_lwt.warn (fun l -> l "%s: %s" name msg) in
+      return_none
     in
     let open ServerMessage in
     match server_message with
     | ResponseOk -> return_none
     | Heartbeat ->
-        Logs_lwt.debug (fun l -> l "Received heartbeat") >>= fun () ->
+        let* () = Logs_lwt.debug (fun l -> l "Received heartbeat") in
         return_some NOP
     | ErrorInvalid s -> warn_return_none "ErrorInvalid" s
     | ErrorBadTopic s -> warn_return_none "ErrorBadTopic" s
@@ -725,7 +738,8 @@ module Consumer = struct
     | ErrorREQFailed s -> warn_return_none "ErrorREQFailed" s
     | ErrorTOUCHFailed s -> warn_return_none "ErrorTOUCHFailed" s
     | Message msg ->
-        handle_message handler msg max_attempts >>= fun cmd -> return_some cmd
+        let* cmd = handle_message handler msg max_attempts in
+        return_some cmd
 
   type loop_message =
     | RawFrame of raw_frame
@@ -736,7 +750,8 @@ module Consumer = struct
 
   let rec read_loop ~timeout conn mbox =
     let put_async m = async (fun () -> Lwt_mvar.put mbox m) in
-    catch_result1 (read_raw_frame ~timeout) conn >>= function
+    let* res = catch_result1 (read_raw_frame ~timeout) conn in
+    match res with
     | Ok raw ->
         put_async (RawFrame raw);
         read_loop ~timeout conn mbox
@@ -746,17 +761,20 @@ module Consumer = struct
 
   let maybe_open_breaker c conn mbox bs =
     let bs = { bs with error_count = bs.error_count + 1 } in
-    Logs_lwt.warn (fun l -> l "Handler returned error, count %d" bs.error_count)
-    >>= fun () ->
+    let* () =
+      Logs_lwt.warn (fun l ->
+          l "Handler returned error, count %d" bs.error_count)
+    in
     if bs.error_count < c.config.error_threshold then return bs
     else
-      Logs_lwt.warn (fun l ->
-          l "Error threshold exceeded (%d of %d)" bs.error_count
-            c.config.error_threshold)
-      >>= fun () ->
+      let* () =
+        Logs_lwt.warn (fun l ->
+            l "Error threshold exceeded (%d of %d)" bs.error_count
+              c.config.error_threshold)
+      in
       (* Send RDY 0 and send retry trial command after a delay  *)
-      Logs_lwt.debug (fun l -> l "Breaker open, sending RDY 0") >>= fun () ->
-      send ~timeout:c.config.write_timeout ~conn (RDY 0) >>= fun () ->
+      let* () = Logs_lwt.debug (fun l -> l "Breaker open, sending RDY 0") in
+      let* () = send ~timeout:c.config.write_timeout ~conn (RDY 0) in
       let bs = { bs with position = Open } in
       let duration =
         backoff_duration ~multiplier:c.config.backoff_multiplier
@@ -781,10 +799,11 @@ module Consumer = struct
         | `Ok, HalfOpen ->
             (* Passed test  *)
             let rdy = rdy_per_connection c in
-            Logs_lwt.debug (fun l ->
-                l "%s Trial passed, sending RDY %d" c.log_prefix rdy)
-            >>= fun () ->
-            send ~timeout:c.config.write_timeout ~conn (RDY rdy) >>= fun () ->
+            let* () =
+              Logs_lwt.debug (fun l ->
+                  l "%s Trial passed, sending RDY %d" c.log_prefix rdy)
+            in
+            let* () = send ~timeout:c.config.write_timeout ~conn (RDY rdy) in
             return { position = Closed; error_count = 0 } )
 
   let consume c conn mbox =
@@ -792,30 +811,39 @@ module Consumer = struct
     let update_breaker_state = update_breaker_state c conn maybe_open_breaker in
     let send = send ~timeout:c.config.write_timeout ~conn in
     let rec mbox_loop bs =
-      Lwt_mvar.take mbox >>= function
+      let* taken = Lwt_mvar.take mbox in
+      match taken with
       | RawFrame raw -> (
           match ServerMessage.of_raw_frame raw with
           | Ok server_message ->
               async (fun () ->
-                  handle_server_message server_message c.handler
-                    c.config.max_attempts
-                  >>= function
+                  let* resp =
+                    handle_server_message server_message c.handler
+                      c.config.max_attempts
+                  in
+                  match resp with
                   | Some c -> Lwt_mvar.put mbox (Command c)
                   | None -> return_unit);
               mbox_loop bs
           | Error s ->
-              Logs_lwt.err (fun l ->
-                  l "%s Error parsing response: %s" c.log_prefix s)
-              >>= fun () -> mbox_loop bs )
+              let* () =
+                Logs_lwt.err (fun l ->
+                    l "%s Error parsing response: %s" c.log_prefix s)
+              in
+              mbox_loop bs )
       | Command cmd ->
-          send cmd >>= fun () -> update_breaker_state cmd bs >>= mbox_loop
+          let* () = send cmd in
+          let* new_state = update_breaker_state cmd bs in
+          mbox_loop new_state
       | TrialBreaker ->
-          Logs_lwt.debug (fun l ->
-              l "%s Breaker trial, sending RDY 1 (Error count: %i)" c.log_prefix
-                bs.error_count)
-          >>= fun () ->
+          let* () =
+            Logs_lwt.debug (fun l ->
+                l "%s Breaker trial, sending RDY 1 (Error count: %i)"
+                  c.log_prefix bs.error_count)
+          in
           let bs = { bs with position = HalfOpen } in
-          send (RDY 1) >>= fun () -> mbox_loop bs
+          let* () = send (RDY 1) in
+          mbox_loop bs
       | ConnectionError s -> fail_with s
       | RecalcRDY -> (
           (* Only recalc and send if breaker is closed  *)
@@ -824,30 +852,36 @@ module Consumer = struct
           | HalfOpen -> mbox_loop bs
           | Closed ->
               let rdy = rdy_per_connection c in
-              Logs_lwt.debug (fun l ->
-                  l "%s Sending recalculated RDY %d" c.log_prefix rdy)
-              >>= fun () ->
-              send (RDY rdy) >>= fun () -> mbox_loop bs )
+              let* () =
+                Logs_lwt.debug (fun l ->
+                    l "%s Sending recalculated RDY %d" c.log_prefix rdy)
+              in
+              let* () = send (RDY rdy) in
+              mbox_loop bs )
     in
-    send MAGIC >>= fun () ->
+    let* () = send MAGIC in
     let ic = Config.to_identity_config c.config in
-    identify ~read_timeout:c.config.read_timeout
-      ~write_timeout:c.config.write_timeout ~conn ic
-    >>= fun () ->
-    subscribe ~read_timeout:c.config.read_timeout
-      ~write_timeout:c.config.write_timeout ~conn c.topic c.channel
-    >>= fun () ->
+    let* () =
+      identify ~read_timeout:c.config.read_timeout
+        ~write_timeout:c.config.write_timeout ~conn ic
+    in
+    let* () =
+      subscribe ~read_timeout:c.config.read_timeout
+        ~write_timeout:c.config.write_timeout ~conn c.topic c.channel
+    in
     (* Start cautiously by sending RDY 1 *)
-    Logs_lwt.debug (fun l -> l "%s Sending initial RDY 1" c.log_prefix)
-    >>= fun () ->
-    send (RDY 1) >>= fun () ->
+    let* () =
+      Logs_lwt.debug (fun l -> l "%s Sending initial RDY 1" c.log_prefix)
+    in
+    let* () = send (RDY 1) in
     (* Start background reader *)
     async (fun () -> read_loop ~timeout:c.config.read_timeout conn mbox);
     let initial_state = { position = HalfOpen; error_count = 0 } in
     mbox_loop initial_state
 
   let rec main_loop ?(error_count = 0) c address ready_calculator mbox =
-    catch_result (fun () -> connect address c.config.dial_timeout) >>= function
+    let* res = catch_result (fun () -> connect address c.config.dial_timeout) in
+    match res with
     | Ok conn ->
         let handle_ex e =
           Lwt.join
@@ -860,26 +894,29 @@ module Consumer = struct
             ]
         in
         Hash_set.add c.open_connections address;
-        Logs_lwt.debug (fun l ->
-            l "%s %d connections" c.log_prefix
-              (Hash_set.length c.open_connections))
-        >>= fun () ->
-        catch (fun () -> consume c conn mbox) handle_ex >>= fun () ->
+        let* () =
+          Logs_lwt.debug (fun l ->
+              l "%s %d connections" c.log_prefix
+                (Hash_set.length c.open_connections))
+        in
+        let* () = catch (fun () -> consume c conn mbox) handle_ex in
         (* Error consuming. If we get here it means that something failed and we need to reconnect *)
         Hash_set.remove c.open_connections address;
-        Logs_lwt.debug (fun l ->
-            l "%s %d connections" c.log_prefix
-              (Hash_set.length c.open_connections))
-        >>= fun () ->
+        let* () =
+          Logs_lwt.debug (fun l ->
+              l "%s %d connections" c.log_prefix
+                (Hash_set.length c.open_connections))
+        in
         let error_count = 1 in
         main_loop ~error_count c address ready_calculator mbox
     | Error e ->
         (* Error connecting *)
-        Logs_lwt.err (fun l ->
-            l "%s Connecting to consumer '%s': %s" c.log_prefix
-              (Address.to_string address)
-              e)
-        >>= fun () ->
+        let* () =
+          Logs_lwt.err (fun l ->
+              l "%s Connecting to consumer '%s': %s" c.log_prefix
+                (Address.to_string address)
+                e)
+        in
         let error_count = error_count + 1 in
         let stop_connecting =
           match c.mode with
@@ -887,21 +924,23 @@ module Consumer = struct
           | `Lookupd -> error_count > lookupd_error_threshold
         in
         if stop_connecting then (
-          Logs_lwt.err (fun l ->
-              l "%s Exceeded reconnection threshold (%d), not reconnecting"
-                c.log_prefix error_count)
-          >>= fun () ->
+          let* () =
+            Logs_lwt.err (fun l ->
+                l "%s Exceeded reconnection threshold (%d), not reconnecting"
+                  c.log_prefix error_count)
+          in
           Lwt.cancel ready_calculator;
           return_unit )
         else
           let duration =
             backoff_duration ~multiplier:default_backoff ~error_count
           in
-          Logs_lwt.debug (fun l ->
-              l "%s Sleeping for %f seconds" c.log_prefix
-                (Seconds.value duration))
-          >>= fun () ->
-          Lwt_unix.sleep (Seconds.value duration) >>= fun () ->
+          let* () =
+            Logs_lwt.debug (fun l ->
+                l "%s Sleeping for %f seconds" c.log_prefix
+                  (Seconds.value duration))
+          in
+          let* () = Lwt_unix.sleep (Seconds.value duration) in
           main_loop ~error_count c address ready_calculator mbox
 
   (** 
@@ -916,9 +955,12 @@ module Consumer = struct
     let jitter = Random.float (recalculate_rdy_interval /. 10.0) in
     let interval = recalculate_rdy_interval +. jitter in
     let rec loop () =
-      Lwt_unix.sleep interval >>= fun () ->
-      Logs_lwt.debug (fun l -> l "%s recalculating RDY" c.log_prefix)
-      >>= fun () -> Lwt_mvar.put mbox RecalcRDY >>= loop
+      let* () = Lwt_unix.sleep interval in
+      let* () =
+        Logs_lwt.debug (fun l -> l "%s recalculating RDY" c.log_prefix)
+      in
+      let* () = Lwt_mvar.put mbox RecalcRDY in
+      loop ()
     in
     loop ()
 
@@ -936,11 +978,13 @@ module Consumer = struct
     let rec check_for_producers () =
       catch
         (fun () ->
-          Logs_lwt.debug (fun l ->
-              l "Querying %d lookupd hosts" (List.length lookup_addresses))
-          >>= fun () ->
-          Lwt_list.map_p (query_nsqlookupd ~topic:c.topic) lookup_addresses
-          >>= fun results ->
+          let* () =
+            Logs_lwt.debug (fun l ->
+                l "Querying %d lookupd hosts" (List.length lookup_addresses))
+          in
+          let* results =
+            Lwt_list.map_p (query_nsqlookupd ~topic:c.topic) lookup_addresses
+          in
           let discovered_producers =
             List.filter_map ~f:Result.ok results
             |> List.map ~f:Lookup.producer_addresses
@@ -949,29 +993,35 @@ module Consumer = struct
           in
           let running = c.open_connections in
           let new_producers = Hash_set.diff discovered_producers running in
-          Logs_lwt.debug (fun l ->
-              l "Found %d new producers" (Hash_set.length new_producers))
-          >>= fun () ->
+          let* () =
+            Logs_lwt.debug (fun l ->
+                l "Found %d new producers" (Hash_set.length new_producers))
+          in
           Hash_set.iter
             ~f:(fun a ->
               async (fun () ->
-                  Logs_lwt.debug (fun l ->
-                      l "Starting consumer for: %s" (Address.to_string a))
-                  >>= fun () -> start_nsqd_consumer c a))
+                  let* () =
+                    Logs_lwt.debug (fun l ->
+                        l "Starting consumer for: %s" (Address.to_string a))
+                  in
+                  start_nsqd_consumer c a))
             new_producers;
-          Lwt_unix.sleep poll_interval >>= fun () -> check_for_producers ())
+          let* () = Lwt_unix.sleep poll_interval in
+          check_for_producers ())
         (fun e ->
-          Logs_lwt.err (fun l ->
-              l "Error polling lookupd: %s" (Exn.to_string e))
-          >>= fun () ->
-          Lwt_unix.sleep default_backoff >>= fun () -> check_for_producers ())
+          let* () =
+            Logs_lwt.err (fun l ->
+                l "Error polling lookupd: %s" (Exn.to_string e))
+          in
+          let* () = Lwt_unix.sleep default_backoff in
+          check_for_producers ())
     in
     check_for_producers ()
 
   let run c =
     match c.mode with
     | `Lookupd ->
-        Logs_lwt.debug (fun l -> l "Starting lookupd poller") >>= fun () ->
+        let* () = Logs_lwt.debug (fun l -> l "Starting lookupd poller") in
         start_polling_lookupd c c.addresses
     | `Nsqd ->
         let consumers =
@@ -1011,13 +1061,14 @@ module Producer = struct
     (* Always return false so that we throw away connections where we encountered an error *)
     let check _ is_ok = is_ok false in
     let dispose c =
-      Logs_lwt.warn (fun l -> l "Error publishing, closing connection")
-      >>= fun () ->
+      let* () =
+        Logs_lwt.warn (fun l -> l "Error publishing, closing connection")
+      in
       join [ Lwt_io.close (fst c.conn); Lwt_io.close (snd c.conn) ]
     in
     Lwt_pool.create size ~validate ~check ~dispose (fun () ->
-        connect address default_dial_timeout >>= fun conn ->
-        send ~timeout:default_write_timeout ~conn MAGIC >>= fun () ->
+        let* conn = connect address default_dial_timeout in
+        let* () = send ~timeout:default_write_timeout ~conn MAGIC in
         let last_write = ref (Unix.time ()) in
         return { conn; last_write })
 
@@ -1028,17 +1079,17 @@ module Producer = struct
   let publish_cmd t cmd =
     let with_conn c =
       let rec read_until_ok () =
-        read_raw_frame ~timeout:default_read_timeout c.conn >>= fun frame ->
+        let* frame = read_raw_frame ~timeout:default_read_timeout c.conn in
         match ServerMessage.of_raw_frame frame with
         | Ok ResponseOk -> return_ok ()
         | Ok Heartbeat ->
-            send ~timeout:default_write_timeout ~conn:c.conn NOP >>= fun () ->
+            let* () = send ~timeout:default_write_timeout ~conn:c.conn NOP in
             c.last_write := Unix.time ();
             read_until_ok ()
         | Ok _ -> return_error "Expected OK or Heartbeat, got another message"
         | Error e -> return_error (Printf.sprintf "Received error: %s" e)
       in
-      send ~timeout:default_write_timeout ~conn:c.conn cmd >>= fun () ->
+      let* () = send ~timeout:default_write_timeout ~conn:c.conn cmd in
       c.last_write := Unix.time ();
       read_until_ok ()
     in
