@@ -4,11 +4,9 @@ open Nsq
 
 let nsqd_address = "localhost"
 
-let nsqd_port = 32781
-
 let publish_error_backoff = 1.0
 
-let to_publish = 2000000
+let to_publish = 500000
 
 let log_interval = 1.0
 
@@ -18,12 +16,18 @@ let published = ref 0
 
 let concurrency = 5
 
+let batch_size = 20
+
 let publish p =
   let rec loop () =
-    let msg = Int.to_string !published |> Bytes.of_string in
-    Producer.publish p (Topic "Test") msg >>= function
+    let msg = Int.to_string !published in
+    let messages =
+      List.init batch_size ~f:(fun i ->
+          msg ^ ":" ^ Int.to_string i |> Bytes.of_string)
+    in
+    Producer.publish_multi p (Topic "Test") messages >>= function
     | Result.Ok _ ->
-        Int.incr published;
+        published := !published + batch_size;
         if !published >= to_publish then Caml.exit 0 else loop ()
     | Result.Error e ->
         Logs_lwt.err (fun l -> l "%s" e) >>= fun () ->
@@ -51,8 +55,7 @@ let () =
   setup_logging (Some Logs.Debug);
   let p =
     Result.ok_or_failwith
-    @@ Producer.create ~pool_size:concurrency
-         (HostPort (nsqd_address, nsqd_port))
+    @@ Producer.create ~pool_size:concurrency (Host nsqd_address)
   in
   let publishers = List.init ~f:(fun _ -> publish p) concurrency in
   start := Unix.gettimeofday ();

@@ -4,11 +4,7 @@ open Nsq
 
 let nsqd_address = "localhost"
 
-let nsqd_port = 32776
-
 let lookupd_address = "localhost"
-
-let lookupd_port = 4161
 
 let make_handler name msg =
   Logs_lwt.debug (fun l -> l "(%s) Handled Body: %s" name (Bytes.to_string msg))
@@ -19,10 +15,7 @@ let publish_error_backoff = 1.0
 let publish_interval_seconds = 1.0
 
 let test_publish () =
-  let p =
-    Result.ok_or_failwith
-    @@ Producer.create (HostPort (nsqd_address, nsqd_port))
-  in
+  let p = Result.ok_or_failwith @@ Producer.create (Host nsqd_address) in
   let rec loop () =
     let msg = Unix.gettimeofday () |> Float.to_string |> Bytes.of_string in
     Logs_lwt.debug (fun l -> l "Publishing: %s" (Bytes.to_string msg))
@@ -43,8 +36,8 @@ let create_consumer ~mode chan_name handler =
   in
   let host_port =
     match mode with
-    | `Nsqd -> Address.HostPort (nsqd_address, nsqd_port)
-    | `Lookupd -> HostPort (lookupd_address, lookupd_port)
+    | `Nsqd -> Address.Host nsqd_address
+    | `Lookupd -> Host lookupd_address
   in
   Consumer.create ~mode ~config [ host_port ] (Topic "Test") (Channel chan_name)
     handler

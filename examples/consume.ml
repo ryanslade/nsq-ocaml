@@ -2,7 +2,7 @@ open Base
 open Lwt
 open Nsq
 
-let nsqd_address = "172.17.0.2"
+let nsqd_address = "localhost"
 
 let log_interval = 1.0
 
