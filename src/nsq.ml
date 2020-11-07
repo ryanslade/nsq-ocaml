@@ -12,9 +12,6 @@ let network_buffer_size = 16 * 1024
 
 let lookupd_error_threshold = 5
 
-(* Buffer shared between functions that produce packets *)
-let shared_buffer = Buffer.create 1000000
-
 module Seconds = struct
   type t = float [@@deriving yojson]
 
@@ -277,6 +274,9 @@ let query_nsqlookupd ~topic a =
       let s = Exn.to_string e in
       log_and_return "Querying lookupd" (Error s))
 
+(* Buffer shared between functions that produce packets *)
+let shared_buffer = Buffer.create 1000000
+
 (* 
     PUB <topic_name>\n
     [ 4-byte size in bytes ][ N-byte binary data ]
@@ -428,10 +428,21 @@ let%expect_test "bytes_of_command" =
   let commands =
     [
       MAGIC;
+      IDENTIFY
+        {
+          heartbeat_interval = Milliseconds.of_int64 5000L;
+          client_id = "client";
+          hostname = "hostname";
+          user_agent = "user_agent";
+          output_buffer_size = 1024;
+          output_buffer_timeout = Milliseconds.of_int64 1000L;
+          sample_rate = 50;
+        };
       NOP;
       RDY 10;
-      FIN (MessageID.of_bytes (Bytes.of_string "ABC"));
+      SUB (Topic "Test", Channel "Test");
       REQ (MessageID.of_bytes (Bytes.of_string "ABC"), 100L);
+      FIN (MessageID.of_bytes (Bytes.of_string "ABC"));
     ]
   in
   List.iter
@@ -441,10 +452,23 @@ let%expect_test "bytes_of_command" =
   [%expect
     {|
         00000000: 2020 5632
+        00000000: 4944 454e 5449 4659 0a00 0000 a87b 2268
+        00000001: 6561 7274 6265 6174 5f69 6e74 6572 7661
+        00000002: 6c22 3a35 3030 302c 2263 6c69 656e 745f
+        00000003: 6964 223a 2263 6c69 656e 7422 2c22 686f
+        00000004: 7374 6e61 6d65 223a 2268 6f73 746e 616d
+        00000005: 6522 2c22 7573 6572 5f61 6765 6e74 223a
+        00000006: 2275 7365 725f 6167 656e 7422 2c22 6f75
+        00000007: 7470 7574 5f62 7566 6665 725f 7369 7a65
+        00000008: 223a 3130 3234 2c22 6f75 7470 7574 5f62
+        00000009: 7566 6665 725f 7469 6d65 6f75 7422 3a31
+        00000010: 3030 302c 2273 616d 706c 655f 7261 7465
+        00000011: 223a 3530 7d
         00000000: 4e4f 500a
         00000000: 5244 5920 3130 0a
-        00000000: 4649 4e20 4142 430a
+        00000000: 5355 4220 5465 7374 2054 6573 740a
         00000000: 5245 5120 4142 4320 3130 300a
+        00000000: 4649 4e20 4142 430a
       |}]
 
 (* Timeout will only apply if > 0.0 *)
