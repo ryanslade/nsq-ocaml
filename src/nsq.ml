@@ -478,8 +478,9 @@ let maybe_timeout ~timeout f =
 
 let send ~timeout ~conn command =
   let oc = snd conn in
-  let data = bytes_of_command command |> Bytes.to_string in
-  maybe_timeout ~timeout (fun () -> Lwt_io.write oc data)
+  let data = bytes_of_command command in
+  maybe_timeout ~timeout (fun () ->
+      Lwt_io.write_from_exactly oc data 0 (Bytes.length data))
 
 let catch_result promise =
   try_bind promise
@@ -524,9 +525,9 @@ let send_expect_ok ~read_timeout ~write_timeout ~conn cmd =
   match ServerMessage.of_raw_frame raw with
   | Ok ResponseOk -> return_unit
   | Ok sm ->
-      fail_with
+      failwith
         (Printf.sprintf "Expected OK, got %s" (ServerMessage.to_string sm))
-  | Error e -> fail_with (Printf.sprintf "Expected OK, got %s" e)
+  | Error e -> failwith (Printf.sprintf "Expected OK, got %s" e)
 
 let subscribe ~read_timeout ~write_timeout ~conn topic channel =
   send_expect_ok ~read_timeout ~write_timeout ~conn (SUB (topic, channel))
@@ -868,7 +869,7 @@ module Consumer = struct
           let bs = { bs with position = HalfOpen } in
           let* () = send (RDY 1) in
           mbox_loop bs
-      | ConnectionError s -> fail_with s
+      | ConnectionError s -> failwith s
       | RecalcRDY -> (
           (* Only recalc and send if breaker is closed  *)
           match bs.position with
@@ -907,11 +908,10 @@ module Consumer = struct
     let* res = catch_result (fun () -> connect address c.config.dial_timeout) in
     match res with
     | Ok conn ->
-        let handle_ex e =
+        let handle_exn e =
           Lwt.join
             [
-              Logs_lwt.err (fun l ->
-                  l "Consumer connection error: %s" (Exn.to_string e));
+              Logs_lwt.err (fun l -> l "Consumer error: %s" (Exn.to_string e));
               Lwt_io.close (fst conn);
               Lwt_io.close (snd conn);
               Lwt_unix.sleep default_backoff;
@@ -923,7 +923,7 @@ module Consumer = struct
               l "%s %d connections" c.log_prefix
                 (Hash_set.length c.open_connections))
         in
-        let* () = catch (fun () -> consume c conn mbox) handle_ex in
+        let* () = catch (fun () -> consume c conn mbox) handle_exn in
         (* Error consuming. If we get here it means that something failed and we need to reconnect *)
         Hash_set.remove c.open_connections address;
         let* () =
