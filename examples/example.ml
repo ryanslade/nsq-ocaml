@@ -1,5 +1,6 @@
 open Base
 open Lwt
+open Lwt.Syntax
 open Nsq
 
 let nsqd_address = "localhost"
@@ -7,8 +8,11 @@ let nsqd_address = "localhost"
 let lookupd_address = "localhost"
 
 let make_handler name msg =
-  Logs_lwt.debug (fun l -> l "(%s) Handled Body: %s" name (Bytes.to_string msg))
-  >>= fun () -> return `Ok
+  let* () =
+    Logs_lwt.debug (fun l ->
+        l "(%s) Handled Body: %s" name (Bytes.to_string msg))
+  in
+  return `Ok
 
 let publish_error_backoff = 1.0
 
@@ -18,13 +22,18 @@ let test_publish () =
   let p = Result.ok_or_failwith @@ Producer.create (Host nsqd_address) in
   let rec loop () =
     let msg = Unix.gettimeofday () |> Float.to_string |> Bytes.of_string in
-    Logs_lwt.debug (fun l -> l "Publishing: %s" (Bytes.to_string msg))
-    >>= fun () ->
-    Producer.publish p (Topic "Test") msg >>= function
-    | Result.Ok _ -> Lwt_unix.sleep publish_interval_seconds >>= loop
+    let* () =
+      Logs_lwt.debug (fun l -> l "Publishing: %s" (Bytes.to_string msg))
+    in
+    let* res = Producer.publish p (Topic "Test") msg in
+    match res with
+    | Result.Ok _ ->
+        let* () = Lwt_unix.sleep publish_interval_seconds in
+        loop ()
     | Result.Error e ->
-        Logs_lwt.err (fun l -> l "%s" e) >>= fun () ->
-        Lwt_unix.sleep publish_error_backoff >>= loop
+        let* () = Logs_lwt.err (fun l -> l "%s" e) in
+        let* () = Lwt_unix.sleep publish_error_backoff in
+        loop ()
   in
   loop ()
 

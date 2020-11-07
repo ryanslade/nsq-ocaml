@@ -1,5 +1,6 @@
 open Base
 open Lwt
+open Lwt.Syntax
 open Nsq
 
 let nsqd_address = "localhost"
@@ -25,24 +26,28 @@ let publish p =
       List.init batch_size ~f:(fun i ->
           msg ^ ":" ^ Int.to_string i |> Bytes.of_string)
     in
-    Producer.publish_multi p (Topic "Test") messages >>= function
+    let* res = Producer.publish_multi p (Topic "Test") messages in
+    match res with
     | Result.Ok _ ->
         published := !published + batch_size;
         if !published >= to_publish then Caml.exit 0 else loop ()
     | Result.Error e ->
-        Logs_lwt.err (fun l -> l "%s" e) >>= fun () ->
-        Lwt_unix.sleep publish_error_backoff >>= fun () -> loop ()
+        let* () = Logs_lwt.err (fun l -> l "%s" e) in
+        let* () = Lwt_unix.sleep publish_error_backoff in
+        loop ()
   in
   loop ()
 
 let rate_logger () =
   let rec loop () =
-    Lwt_unix.sleep log_interval >>= fun () ->
+    let* () = Lwt_unix.sleep log_interval in
     let published = !published in
     let elapsed = Unix.gettimeofday () -. !start in
     let per_sec = Float.of_int published /. elapsed in
-    Logs_lwt.debug (fun l -> l "Published %d, %f/s" published per_sec)
-    >>= fun () -> loop ()
+    let* () =
+      Logs_lwt.debug (fun l -> l "Published %d, %f/s" published per_sec)
+    in
+    loop ()
   in
   loop ()
 
