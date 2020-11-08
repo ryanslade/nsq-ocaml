@@ -1,0 +1,8 @@
+(executables
+ (names integration)
+ (libraries base nsq alcotest alcotest-lwt lwt))
+
+(rule
+ (alias runtest)
+ (action
+  (run ./integration.exe)))
