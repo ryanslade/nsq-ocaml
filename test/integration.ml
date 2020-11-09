@@ -2,6 +2,9 @@ open Base
 open Lwt
 open Lwt.Syntax
 
+let check_result prefix r =
+  match r with Ok x -> x | Error s -> Alcotest.failf "%s: %s" prefix s
+
 let test_publish_and_consume _ () =
   let open Nsq in
   let address = Address.Host "localhost" in
@@ -17,12 +20,12 @@ let test_publish_and_consume _ () =
   let c = Consumer.create [ address ] topic channel handler in
   (* Start consumer in background *)
   async (fun () -> Consumer.run c);
-  let p = Producer.create address |> Result.ok_or_failwith in
+  let p = Producer.create address |> check_result "Creating producer" in
   (* Send single payload *)
   let* res = Producer.publish p topic payload in
-  let () = Result.ok_or_failwith res in
+  let () = check_result "Single publish" res in
   let* res = Producer.publish_multi p topic [ payload; payload ] in
-  let () = Result.ok_or_failwith res in
+  let () = check_result "Multi publish" res in
   (* At this point we should have payload queus up three times *)
   let* pub1 = Lwt_mvar.take mvar in
   let* multi1 = Lwt_mvar.take mvar in
