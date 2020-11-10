@@ -969,12 +969,12 @@ module Consumer = struct
           main_loop ~error_count c address cancel_ready_calculator mbox
 
   (** 
-           Start a thread to update RDY count occasionaly.
-           The number of open connections can change as we add new consumers due to lookupd
-           discovering producers or we have connection failures. Each time a new connection 
-           is opened or closed the consumer.nsqd_connections field is updated.
-           We therefore need to occasionaly update our RDY count as this may have changed so that
-           it is spread evenly across connections.
+    Start a thread to update RDY count occasionaly.
+    The number of open connections can change as we add new consumers due to lookupd
+    discovering producers or we have connection failures. Each time a new connection 
+    is opened or closed the consumer.nsqd_connections field is updated.
+    We therefore need to occasionaly update our RDY count as this may have changed so that
+    it is spread evenly across connections.
   *)
   let start_ready_calculator c mbox =
     let jitter = Random.float (recalculate_rdy_interval /. 10.0) in
@@ -992,6 +992,7 @@ module Consumer = struct
     in
     (* Start loop in background *)
     async (fun () -> loop ());
+    (* Return a func to flip switch and cancel the loop *)
     fun () -> Lwt_switch.turn_off switch
 
   let start_nsqd_consumer c address =
