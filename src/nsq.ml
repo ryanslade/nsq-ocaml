@@ -904,9 +904,11 @@ module Consumer = struct
     let initial_state = { position = HalfOpen; error_count = 0 } in
     mbox_loop initial_state
 
-  let rec main_loop ?(error_count = 0) c address ready_calculator mbox =
-    let* res = catch_result (fun () -> connect address c.config.dial_timeout) in
-    match res with
+  let rec main_loop ?(error_count = 0) c address cancel_ready_calculator mbox =
+    let* conn =
+      catch_result (fun () -> connect address c.config.dial_timeout)
+    in
+    match conn with
     | Ok conn ->
         let handle_exn e =
           Lwt.join
@@ -932,7 +934,7 @@ module Consumer = struct
                 (Hash_set.length c.open_connections))
         in
         let error_count = 1 in
-        main_loop ~error_count c address ready_calculator mbox
+        main_loop ~error_count c address cancel_ready_calculator mbox
     | Error e ->
         (* Error connecting *)
         let* () =
@@ -947,14 +949,13 @@ module Consumer = struct
           | `Nsqd -> false
           | `Lookupd -> error_count > lookupd_error_threshold
         in
-        if stop_connecting then (
+        if stop_connecting then
           let* () =
             Logs_lwt.err (fun l ->
                 l "%s Exceeded reconnection threshold (%d), not reconnecting"
                   c.log_prefix error_count)
           in
-          Lwt.cancel ready_calculator;
-          return_unit )
+          cancel_ready_calculator ()
         else
           let duration =
             backoff_duration ~multiplier:default_backoff ~error_count
@@ -965,10 +966,10 @@ module Consumer = struct
                   (Seconds.value duration))
           in
           let* () = Lwt_unix.sleep (Seconds.value duration) in
-          main_loop ~error_count c address ready_calculator mbox
+          main_loop ~error_count c address cancel_ready_calculator mbox
 
   (** 
-           Start an async thread to update RDY count occasionaly.
+           Start a thread to update RDY count occasionaly.
            The number of open connections can change as we add new consumers due to lookupd
            discovering producers or we have connection failures. Each time a new connection 
            is opened or closed the consumer.nsqd_connections field is updated.
@@ -978,20 +979,25 @@ module Consumer = struct
   let start_ready_calculator c mbox =
     let jitter = Random.float (recalculate_rdy_interval /. 10.0) in
     let interval = recalculate_rdy_interval +. jitter in
+    let switch = Lwt_switch.create () in
     let rec loop () =
-      let* () = Lwt_unix.sleep interval in
-      let* () =
-        Logs_lwt.debug (fun l -> l "%s recalculating RDY" c.log_prefix)
-      in
-      let* () = Lwt_mvar.put mbox RecalcRDY in
-      loop ()
+      if not (Lwt_switch.is_on switch) then return_unit
+      else
+        let* () = Lwt_unix.sleep interval in
+        let* () =
+          Logs_lwt.debug (fun l -> l "%s recalculating RDY" c.log_prefix)
+        in
+        let* () = Lwt_mvar.put mbox RecalcRDY in
+        loop ()
     in
-    loop ()
+    (* Start loop in background *)
+    async (fun () -> loop ());
+    fun () -> Lwt_switch.turn_off switch
 
   let start_nsqd_consumer c address =
     let mbox = Lwt_mvar.create_empty () in
-    let ready_calculator = start_ready_calculator c mbox in
-    main_loop c address ready_calculator mbox
+    let cancel_ready_calculator = start_ready_calculator c mbox in
+    main_loop c address cancel_ready_calculator mbox
 
   let start_polling_lookupd c lookup_addresses =
     let poll_interval =
