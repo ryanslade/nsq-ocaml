@@ -1000,7 +1000,7 @@ module Consumer = struct
     let cancel_ready_calculator = start_ready_calculator c mbox in
     main_loop c address cancel_ready_calculator mbox
 
-  let start_polling_lookupd c lookup_addresses =
+  let start_polling_lookupd c =
     let poll_interval =
       Float.(
         (1.0 + Random.float c.config.lookupd_poll_jitter)
@@ -1011,10 +1011,10 @@ module Consumer = struct
         (fun () ->
           let* () =
             Logs_lwt.debug (fun l ->
-                l "Querying %d lookupd hosts" (List.length lookup_addresses))
+                l "Querying %d lookupd hosts" (List.length c.addresses))
           in
           let* results =
-            Lwt_list.map_p (query_nsqlookupd ~topic:c.topic) lookup_addresses
+            Lwt_list.map_p (query_nsqlookupd ~topic:c.topic) c.addresses
           in
           let discovered_producers =
             List.filter_map ~f:Result.ok results
@@ -1053,7 +1053,7 @@ module Consumer = struct
     match c.mode with
     | `Lookupd ->
         let* () = Logs_lwt.debug (fun l -> l "Starting lookupd poller") in
-        start_polling_lookupd c c.addresses
+        start_polling_lookupd c
     | `Nsqd ->
         let consumers =
           List.map ~f:(fun a -> start_nsqd_consumer c a) c.addresses
