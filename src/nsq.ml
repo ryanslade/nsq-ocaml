@@ -907,7 +907,7 @@ module Consumer = struct
     let initial_state = { position = HalfOpen; error_count = 0 } in
     mbox_loop initial_state
 
-  let connection_loop c address cancel_ready_calculator mbox =
+  let connection_loop c address mbox =
     let rec loop error_count =
       let* conn =
         catch_result (fun () -> connect address c.config.dial_timeout)
@@ -954,12 +954,10 @@ module Consumer = struct
             | `Lookupd -> error_count > lookupd_error_threshold
           in
           if stop_connecting then
-            let* () =
-              Logs_lwt.err (fun l ->
-                  l "%s Exceeded reconnection threshold (%d), not reconnecting"
-                    c.log_prefix error_count)
-            in
-            cancel_ready_calculator ()
+            (* Log and stop recursing *)
+            Logs_lwt.err (fun l ->
+                l "%s Exceeded reconnection threshold (%d), not reconnecting"
+                  c.log_prefix error_count)
           else
             let duration =
               backoff_duration ~multiplier:default_backoff ~error_count
@@ -1003,8 +1001,10 @@ module Consumer = struct
 
   let start_nsqd_consumer c address =
     let mbox = Lwt_mvar.create_empty () in
-    let cancel_ready_calculator = start_ready_calculator c mbox in
-    connection_loop c address cancel_ready_calculator mbox
+    let cancel = start_ready_calculator c mbox in
+    let* () = connection_loop c address mbox in
+    (* We've given up on the connection loop, clean up *)
+    cancel ()
 
   let start_polling_lookupd c =
     let poll_interval =
