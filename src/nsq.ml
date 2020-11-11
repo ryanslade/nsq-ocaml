@@ -907,69 +907,72 @@ module Consumer = struct
     let initial_state = { position = HalfOpen; error_count = 0 } in
     mbox_loop initial_state
 
-  let rec main_loop ?(error_count = 0) c address cancel_ready_calculator mbox =
-    let* conn =
-      catch_result (fun () -> connect address c.config.dial_timeout)
-    in
-    match conn with
-    | Ok conn ->
-        let handle_exn e =
-          Lwt.join
-            [
-              Logs_lwt.err (fun l -> l "Consumer error: %s" (Exn.to_string e));
-              Lwt_io.close (fst conn);
-              Lwt_io.close (snd conn);
-              Lwt_unix.sleep default_backoff;
-            ]
-        in
-        Hash_set.add c.open_connections address;
-        let* () =
-          Logs_lwt.debug (fun l ->
-              l "%s %d connections" c.log_prefix
-                (Hash_set.length c.open_connections))
-        in
-        let* () = catch (fun () -> consume c conn mbox) handle_exn in
-        (* Error consuming. If we get here it means that something failed and we need to reconnect *)
-        Hash_set.remove c.open_connections address;
-        let* () =
-          Logs_lwt.debug (fun l ->
-              l "%s %d connections" c.log_prefix
-                (Hash_set.length c.open_connections))
-        in
-        let error_count = 1 in
-        main_loop ~error_count c address cancel_ready_calculator mbox
-    | Error e ->
-        (* Error connecting *)
-        let* () =
-          Logs_lwt.err (fun l ->
-              l "%s Connecting to consumer '%s': %s" c.log_prefix
-                (Address.to_string address)
-                e)
-        in
-        let error_count = error_count + 1 in
-        let stop_connecting =
-          match c.mode with
-          | `Nsqd -> false
-          | `Lookupd -> error_count > lookupd_error_threshold
-        in
-        if stop_connecting then
-          let* () =
-            Logs_lwt.err (fun l ->
-                l "%s Exceeded reconnection threshold (%d), not reconnecting"
-                  c.log_prefix error_count)
+  let connection_loop c address cancel_ready_calculator mbox =
+    let rec loop error_count =
+      let* conn =
+        catch_result (fun () -> connect address c.config.dial_timeout)
+      in
+      match conn with
+      | Ok conn ->
+          let handle_exn e =
+            Lwt.join
+              [
+                Logs_lwt.err (fun l -> l "Consumer error: %s" (Exn.to_string e));
+                Lwt_io.close (fst conn);
+                Lwt_io.close (snd conn);
+                Lwt_unix.sleep default_backoff;
+              ]
           in
-          cancel_ready_calculator ()
-        else
-          let duration =
-            backoff_duration ~multiplier:default_backoff ~error_count
-          in
+          Hash_set.add c.open_connections address;
           let* () =
             Logs_lwt.debug (fun l ->
-                l "%s Sleeping for %f seconds" c.log_prefix
-                  (Seconds.value duration))
+                l "%s %d connections" c.log_prefix
+                  (Hash_set.length c.open_connections))
           in
-          let* () = Lwt_unix.sleep (Seconds.value duration) in
-          main_loop ~error_count c address cancel_ready_calculator mbox
+          let* () = catch (fun () -> consume c conn mbox) handle_exn in
+          (* Error consuming. If we get here it means that something failed and we need to reconnect *)
+          Hash_set.remove c.open_connections address;
+          let* () =
+            Logs_lwt.debug (fun l ->
+                l "%s %d connections" c.log_prefix
+                  (Hash_set.length c.open_connections))
+          in
+          let error_count = 1 in
+          loop error_count
+      | Error e ->
+          (* Error connecting *)
+          let* () =
+            Logs_lwt.err (fun l ->
+                l "%s Connecting to consumer '%s': %s" c.log_prefix
+                  (Address.to_string address)
+                  e)
+          in
+          let error_count = error_count + 1 in
+          let stop_connecting =
+            match c.mode with
+            | `Nsqd -> false
+            | `Lookupd -> error_count > lookupd_error_threshold
+          in
+          if stop_connecting then
+            let* () =
+              Logs_lwt.err (fun l ->
+                  l "%s Exceeded reconnection threshold (%d), not reconnecting"
+                    c.log_prefix error_count)
+            in
+            cancel_ready_calculator ()
+          else
+            let duration =
+              backoff_duration ~multiplier:default_backoff ~error_count
+            in
+            let* () =
+              Logs_lwt.debug (fun l ->
+                  l "%s Sleeping for %f seconds" c.log_prefix
+                    (Seconds.value duration))
+            in
+            let* () = Lwt_unix.sleep (Seconds.value duration) in
+            loop error_count
+    in
+    loop 0
 
   (** 
     Start a thread to update RDY count occasionaly.
@@ -1001,7 +1004,7 @@ module Consumer = struct
   let start_nsqd_consumer c address =
     let mbox = Lwt_mvar.create_empty () in
     let cancel_ready_calculator = start_ready_calculator c mbox in
-    main_loop c address cancel_ready_calculator mbox
+    connection_loop c address cancel_ready_calculator mbox
 
   let start_polling_lookupd c =
     let poll_interval =
