@@ -773,16 +773,19 @@ module Consumer = struct
     | ConnectionError of string
     | RecalcRDY
 
-  let rec read_loop ~timeout conn mbox =
+  let read_loop ~timeout conn mbox =
     let put_async m = async (fun () -> Lwt_mvar.put mbox m) in
-    let* res = catch_result1 (read_raw_frame ~timeout) conn in
-    match res with
-    | Ok raw ->
-        put_async (RawFrame raw);
-        read_loop ~timeout conn mbox
-    | Error s ->
-        put_async (ConnectionError s);
-        return_unit
+    let rec loop () =
+      let* res = catch_result1 (read_raw_frame ~timeout) conn in
+      match res with
+      | Ok raw ->
+          put_async (RawFrame raw);
+          loop ()
+      | Error s ->
+          put_async (ConnectionError s);
+          return_unit
+    in
+    loop ()
 
   let maybe_open_breaker c conn mbox bs =
     let bs = { bs with error_count = bs.error_count + 1 } in
