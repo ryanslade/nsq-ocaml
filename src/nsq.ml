@@ -1070,7 +1070,7 @@ end
 module Producer = struct
   type connection = {
     conn : Lwt_io.input Lwt_io.channel * Lwt_io.output Lwt_io.channel;
-    last_write : float ref;
+    mutable last_write : float;
   }
 
   type t = { address : Address.t; pool : connection Lwt_pool.t }
@@ -1092,7 +1092,7 @@ module Producer = struct
   let create_pool address size =
     let validate c =
       let now = Unix.time () in
-      let diff = now -. !(c.last_write) in
+      let diff = now -. c.last_write in
       return Float.(diff < ttl_seconds)
     in
     (* Always return false so that we throw away connections where we encountered an error *)
@@ -1106,7 +1106,7 @@ module Producer = struct
     Lwt_pool.create size ~validate ~check ~dispose (fun () ->
         let* conn = connect address default_dial_timeout in
         let* () = send ~timeout:default_write_timeout ~conn MAGIC in
-        let last_write = ref (Unix.time ()) in
+        let last_write = Unix.time () in
         return { conn; last_write })
 
   let create ?(pool_size = default_pool_size) address =
@@ -1121,13 +1121,13 @@ module Producer = struct
         | Ok ResponseOk -> return_ok ()
         | Ok Heartbeat ->
             let* () = send ~timeout:default_write_timeout ~conn:c.conn NOP in
-            c.last_write := Unix.time ();
+            c.last_write <- Unix.time ();
             read_until_ok ()
         | Ok _ -> return_error "Expected OK or Heartbeat, got another message"
         | Error e -> return_error (Printf.sprintf "Received error: %s" e)
       in
       let* () = send ~timeout:default_write_timeout ~conn:c.conn cmd in
-      c.last_write := Unix.time ();
+      c.last_write <- Unix.time ();
       read_until_ok ()
     in
     let try_publish () = Lwt_pool.use t.pool with_conn in
