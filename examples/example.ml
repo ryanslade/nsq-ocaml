@@ -4,7 +4,6 @@ open Lwt.Syntax
 open Nsq
 
 let nsqd_address = "localhost"
-
 let lookupd_address = "localhost"
 
 let make_handler name msg =
@@ -15,7 +14,6 @@ let make_handler name msg =
   return `Ok
 
 let publish_error_backoff = 1.0
-
 let publish_interval_seconds = 1.0
 
 let test_publish () =

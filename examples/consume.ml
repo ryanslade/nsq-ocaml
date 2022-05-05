@@ -3,15 +3,10 @@ open Lwt
 open Nsq
 
 let nsqd_address = "localhost"
-
 let log_interval = 1.0
-
 let start = ref (Unix.gettimeofday ())
-
 let expected = 500000
-
 let consumed = ref 0
-
 let in_flight = 100
 
 let rate_logger () =

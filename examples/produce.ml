@@ -4,19 +4,12 @@ open Lwt.Syntax
 open Nsq
 
 let nsqd_address = "localhost"
-
 let publish_error_backoff = 1.0
-
 let to_publish = 500000
-
 let log_interval = 1.0
-
 let start = ref (Unix.gettimeofday ())
-
 let published = ref 0
-
 let concurrency = 5
-
 let batch_size = 20
 
 let publish p =

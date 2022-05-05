@@ -3,36 +3,27 @@ open Lwt
 open Lwt.Syntax
 
 let client_version = "0.5.3"
-
 let default_nsqd_port = 4150
-
 let default_lookupd_port = 4161
-
 let network_buffer_size = 16 * 1024
-
 let lookupd_error_threshold = 5
 
 module Seconds = struct
   type t = float [@@deriving yojson]
 
   let of_float f = f
-
   let value s = s
 end
 
 let recalculate_rdy_interval = Seconds.of_float 60.0
-
 let default_backoff = Seconds.of_float 5.0
-
 let max_backoff = Seconds.of_float 600.0
 
 module Milliseconds = struct
   type t = int64 [@@deriving yojson]
 
   let of_int64 i = i
-
   let value i = i
-
   let of_seconds s = Seconds.value s *. 1000.0 |> Int64.of_float |> of_int64
 end
 
@@ -42,7 +33,6 @@ module MessageID = struct
   type t = MessageID of bytes
 
   let of_bytes b = MessageID b
-
   let to_string = function MessageID id -> Bytes.to_string id
 end
 
@@ -100,7 +90,6 @@ module Address = struct
   [@@deriving sexp_of, compare, hash, equal]
 
   let host s = Host s
-
   let host_port a p = HostPort (a, p)
 
   let to_string a =
@@ -200,7 +189,7 @@ module ServerMessage = struct
         | "E_FIN_FAILED" -> return (ErrorFINFailed detail)
         | "E_REQ_FAILED" -> return (ErrorREQFailed detail)
         | "E_TOUCH_FAILED" -> return (ErrorTOUCHFailed detail)
-        | _ -> fail (Printf.sprintf "Unknown error code: %s. %s" code detail) )
+        | _ -> fail (Printf.sprintf "Unknown error code: %s. %s" code detail))
     | _ ->
         fail (Printf.sprintf "Malformed error code: %s" (Bytes.to_string body))
 
@@ -277,11 +266,11 @@ let query_nsqlookupd ~topic a =
 (* Buffer shared between functions that produce packets *)
 let shared_buffer = Buffer.create 1000000
 
-(* 
-    PUB <topic_name>\n
-    [ 4-byte size in bytes ][ N-byte binary data ]
-    
-    <topic_name> - a valid string (optionally having #ephemeral suffix) 
+(*
+     PUB <topic_name>\n
+     [ 4-byte size in bytes ][ N-byte binary data ]
+
+     <topic_name> - a valid string (optionally having #ephemeral suffix)
 *)
 let bytes_of_pub =
   (* Preallocate buffers that we can reuse between runs *)
@@ -314,14 +303,14 @@ let%expect_test "bytes_of_pub" =
         00000002: 7361 6765
       |}]
 
-(* 
-   MPUB <topic_name>\n
-   [ 4-byte body size ]
-   [ 4-byte num messages ]
-   [ 4-byte message #1 size ][ N-byte binary data ]
-      ... (repeated <num_messages> times)
+(*
+    MPUB <topic_name>\n
+    [ 4-byte body size ]
+    [ 4-byte num messages ]
+    [ 4-byte message #1 size ][ N-byte binary data ]
+       ... (repeated <num_messages> times)
 
-   <topic_name> - a valid string (optionally having #ephemeral suffix)
+    <topic_name> - a valid string (optionally having #ephemeral suffix)
 *)
 let bytes_of_mpub =
   let header = Bytes.create 8 in
@@ -544,7 +533,6 @@ module Consumer = struct
       backoff_multiplier : float;
       error_threshold : int;
       (* After how many errors do we send RDY 0 and back off *)
-
       (* network timeouts in seconds *)
       dial_timeout : Seconds.t;
       read_timeout : Seconds.t;
@@ -663,7 +651,6 @@ module Consumer = struct
   }
 
   type breaker_position = Closed | HalfOpen | Open
-
   type breaker_state = { position : breaker_position; error_count : int }
 
   let backoff_duration ~multiplier ~error_count =
@@ -832,7 +819,7 @@ module Consumer = struct
                   l "%s Trial passed, sending RDY %d" c.log_prefix rdy)
             in
             let* () = send ~timeout:c.config.write_timeout ~conn (RDY rdy) in
-            return { position = Closed; error_count = 0 } )
+            return { position = Closed; error_count = 0 })
 
   let consume c conn mbox =
     let maybe_open_breaker = maybe_open_breaker c conn mbox in
@@ -858,7 +845,7 @@ module Consumer = struct
                 Logs_lwt.err (fun l ->
                     l "%s Error parsing response: %s" c.log_prefix s)
               in
-              mbox_loop bs )
+              mbox_loop bs)
       | Command cmd ->
           let* () = send cmd in
           let* new_state = update_breaker_state cmd bs in
@@ -885,7 +872,7 @@ module Consumer = struct
                     l "%s Sending recalculated RDY %d" c.log_prefix rdy)
               in
               let* () = send (RDY rdy) in
-              mbox_loop bs )
+              mbox_loop bs)
     in
     let* () = send MAGIC in
     let ic = Config.to_identity_config c.config in
@@ -1076,11 +1063,8 @@ module Producer = struct
   type t = { address : Address.t; pool : connection Lwt_pool.t }
 
   let default_pool_size = 5
-
   let default_dial_timeout = Seconds.of_float 15.0
-
   let default_write_timeout = Seconds.of_float 15.0
-
   let default_read_timeout = Seconds.of_float 15.0
 
   (** Throw away connections that are idle for this long

@@ -2,7 +2,6 @@ module Seconds : sig
   type t
 
   val of_float : float -> t
-
   val value : t -> float
 end
 
@@ -10,9 +9,7 @@ module Milliseconds : sig
   type t
 
   val of_int64 : int64 -> t
-
   val value : t -> int64
-
   val of_seconds : Seconds.t -> t
 end
 
@@ -20,13 +17,9 @@ module Address : sig
   type t = Host of string | HostPort of string * int
 
   val host : string -> t
-
   val host_port : string -> int -> t
-
   val to_string : t -> string
-
   val compare : t -> t -> int
-
   val equal : t -> t -> bool
 end
 
@@ -46,9 +39,7 @@ module Producer : sig
   type t
 
   val create : ?pool_size:int -> Address.t -> (t, string) result
-
   val publish : t -> Topic.t -> bytes -> (unit, string) result Lwt.t
-
   val publish_multi : t -> Topic.t -> bytes list -> (unit, string) result Lwt.t
 end
 
