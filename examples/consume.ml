@@ -16,7 +16,7 @@ let rate_logger () =
     let elapsed = Unix.gettimeofday () -. !start in
     let per_sec = Float.of_int consumed /. elapsed in
     Logs_lwt.debug (fun l -> l "Consumed %d, %f/s" consumed per_sec)
-    >>= fun () -> if consumed >= expected then Caml.exit 0 else loop ()
+    >>= fun () -> if consumed >= expected then Stdlib.exit 0 else loop ()
   in
   loop ()
 

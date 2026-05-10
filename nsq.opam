@@ -9,18 +9,20 @@ dev-repo: "git+https://github.com/ryanslade/nsq-ocaml.git"
 build: [["dune" "build" "-p" name "-j" jobs]]
 synopsis: "A client library for the NSQ messaging platform"
 depends: [
-  "ocaml" {>= "4.08.0"}
+  "ocaml" {>= "5.4.1"}
   "dune" {>= "2.0"}
   "base"
+  "core"
   "stdio"
   "lwt" {>= "3.2.0"}
   "integers"
   "cohttp"
   "cohttp-lwt-unix"
   "yojson"
-  "ocaml-migrate-parsetree"
   "ppx_deriving_yojson"
   "ppx_jane"
   "logs"
   "hex"
+  "alcotest" {with-test}
+  "alcotest-lwt" {with-test}
 ]

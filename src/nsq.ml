@@ -554,19 +554,20 @@ module Consumer = struct
     [@@deriving fields]
 
     let validate t =
-      let module V = Validate in
-      let w check = V.field_folder t check in
+      let module V = Core.Validate in
+      let module Maybe_bound = Core.Maybe_bound in
+      let w check = V.field_folder check t in
       let bound_int ~min ~max =
-        Int.validate_bound ~min:(Maybe_bound.Incl min)
+        Core.Int.validate_bound ~min:(Maybe_bound.Incl min)
           ~max:(Maybe_bound.Incl max)
       in
       let bound_float ~min ~max =
-        Float.validate_bound ~min:(Maybe_bound.Incl min)
+        Core.Float.validate_bound ~min:(Maybe_bound.Incl min)
           ~max:(Maybe_bound.Incl max)
       in
       let string_not_blank s = String.is_empty s |> not in
       V.of_list
-        (Fields.fold ~init:[] ~max_in_flight:(w Int.validate_positive)
+        (Fields.fold ~init:[] ~max_in_flight:(w Core.Int.validate_positive)
            ~max_attempts:(w (bound_int ~min:0 ~max:65535))
            ~dial_timeout:(w (bound_float ~min:0.1 ~max:300.0))
            ~read_timeout:(w (bound_float ~min:0.1 ~max:300.0))
@@ -583,7 +584,7 @@ module Consumer = struct
            ~hostname:(w (V.booltest string_not_blank ~if_false:"blank"))
            ~user_agent:(w (V.booltest string_not_blank ~if_false:"blank"))
            ~error_threshold:(w (bound_int ~min:1 ~max:10000))
-           ~backoff_multiplier:(w Float.validate_positive))
+           ~backoff_multiplier:(w Core.Float.validate_positive))
 
     let create ?(max_in_flight = 1) ?(max_attempts = 5)
         ?(backoff_multiplier = 0.5) ?(error_threshold = 1)
@@ -621,7 +622,7 @@ module Consumer = struct
           sample_rate;
         }
       in
-      Validate.valid_or_error t validate
+      Core.Validate.valid_or_error validate t
       |> Result.map_error ~f:Error.to_string_hum
 
     let to_identity_config c =
@@ -959,10 +960,10 @@ module Consumer = struct
     in
     loop 0
 
-  (** 
+  (**
     Start a thread to update RDY count occasionaly.
     The number of open connections can change as we add new consumers due to lookupd
-    discovering producers or we have connection failures. Each time a new connection 
+    discovering producers or we have connection failures. Each time a new connection
     is opened or closed the consumer.nsqd_connections field is updated.
     We therefore need to occasionaly update our RDY count as this may have changed so that
     it is spread evenly across connections.

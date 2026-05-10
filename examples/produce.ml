@@ -23,7 +23,7 @@ let publish p =
     match res with
     | Result.Ok _ ->
         published := !published + batch_size;
-        if !published >= to_publish then Caml.exit 0 else loop ()
+        if !published >= to_publish then Stdlib.exit 0 else loop ()
     | Result.Error e ->
         let* () = Logs_lwt.err (fun l -> l "%s" e) in
         let* () = Lwt_unix.sleep publish_error_backoff in
