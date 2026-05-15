@@ -44,7 +44,7 @@ module Topic = struct
 
   let%expect_test "to_string" =
     List.iter
-      ~f:(fun h -> to_string h |> Stdio.print_endline)
+      ~f:(fun h -> to_string h |> Stdlib.print_endline)
       [ Topic "topic"; TopicEphemeral "topic" ];
     [%expect {|
     topic
@@ -58,7 +58,7 @@ module Channel = struct
 
   let%expect_test "to_string" =
     List.iter
-      ~f:(fun h -> to_string h |> Stdio.print_endline)
+      ~f:(fun h -> to_string h |> Stdlib.print_endline)
       [ Channel "chan"; ChannelEphemeral "chan" ];
     [%expect {|
     chan
@@ -79,7 +79,7 @@ type raw_frame = { frame_type : int32; data : Bytes.t }
 
 type raw_message = {
   timestamp : int64;
-  attempts : Unsigned.UInt16.t;
+  attempts : int;
   id : MessageID.t;
   body : Bytes.t;
 }
@@ -96,7 +96,7 @@ module Address = struct
 
   let%expect_test "to_string" =
     List.iter
-      ~f:(fun h -> to_string h |> Stdio.print_endline)
+      ~f:(fun h -> to_string h |> Stdlib.print_endline)
       [ Host "example.com"; HostPort ("example.com", 123) ];
     [%expect {|
       example.com
@@ -168,7 +168,7 @@ module ServerMessage = struct
   let parse_message_body_exn body =
     let open Stdlib in
     let timestamp = Bytes.get_int64_be body 0 in
-    let attempts = Bytes.get_uint16_be body 8 |> Unsigned.UInt16.of_int in
+    let attempts = Bytes.get_uint16_be body 8 in
     let length = Bytes.length body in
     let id = MessageID.of_bytes (Bytes.sub body 10 16) in
     let body = Bytes.sub body 26 (length - 26) in
@@ -676,7 +676,7 @@ module Consumer = struct
     List.iteri
       ~f:(fun i (multiplier, error_count) ->
         let r = backoff_duration ~multiplier ~error_count in
-        Stdio.print_endline
+        Stdlib.print_endline
           (Printf.sprintf "Case %d: Backoff = %f" i (Seconds.value r)))
       test_cases;
     [%expect
@@ -732,15 +732,14 @@ module Consumer = struct
     match handler_result with
     | `Ok -> FIN msg.id
     | `Requeue ->
-        let attempts = Unsigned.UInt16.to_int msg.attempts in
-        if attempts >= max_attempts then begin
+        if msg.attempts >= max_attempts then begin
           Logs.warn (fun l ->
               l "Discarding message %s as reached max attempts, %d"
-                (MessageID.to_string msg.id) attempts);
+                (MessageID.to_string msg.id) msg.attempts);
           FIN msg.id
         end
         else
-          let delay = requeue_delay attempts in
+          let delay = requeue_delay msg.attempts in
           REQ (msg.id, delay)
 
   let handle_server_message server_message handler max_attempts =

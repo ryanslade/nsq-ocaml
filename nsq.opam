@@ -13,10 +13,8 @@ depends: [
   "dune" {>= "3.0"}
   "base"
   "core"
-  "stdio"
   "eio" {>= "1.0"}
   "eio_main" {>= "1.0"}
-  "integers"
   "cohttp"
   "cohttp-eio"
   "yojson"
