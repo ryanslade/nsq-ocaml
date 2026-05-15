@@ -199,6 +199,91 @@ module ServerMessage = struct
     | FrameError -> parse_error_body raw.data
     | FrameUnknown i ->
         Result.Error (Printf.sprintf "Unknown frame type: %li" i)
+
+  let%expect_test "parse_response_body" =
+    let cases = [ "OK"; "_heartbeat_"; "wat" ] in
+    List.iter cases ~f:(fun s ->
+        let r = parse_response_body (Bytes.of_string s) in
+        let str =
+          match r with Ok m -> to_string m | Error e -> "ERR: " ^ e
+        in
+        Stdlib.print_endline (Printf.sprintf "%s -> %s" s str));
+    [%expect
+      {|
+      OK -> OK
+      _heartbeat_ -> Heartbeat
+      wat -> ERR: Unknown response: wat
+      |}]
+
+  let%expect_test "parse_error_body" =
+    let cases =
+      [
+        "E_INVALID detail";
+        "E_BAD_TOPIC detail";
+        "E_BAD_CHANNEL detail";
+        "E_FIN_FAILED detail";
+        "E_REQ_FAILED detail";
+        "E_TOUCH_FAILED detail";
+        "E_UNKNOWN detail";
+        "malformed";
+      ]
+    in
+    List.iter cases ~f:(fun s ->
+        let r = parse_error_body (Bytes.of_string s) in
+        let str =
+          match r with Ok m -> to_string m | Error e -> "ERR: " ^ e
+        in
+        Stdlib.print_endline (Printf.sprintf "%s -> %s" s str));
+    [%expect
+      {|
+      E_INVALID detail -> ErrorInvalid: detail
+      E_BAD_TOPIC detail -> ErrorBadTopic: detail
+      E_BAD_CHANNEL detail -> ErrorBadChannel: detail
+      E_FIN_FAILED detail -> ErrorFINFailed: detail
+      E_REQ_FAILED detail -> ErrorREQFailed: detail
+      E_TOUCH_FAILED detail -> ErrTouchFailed: detail
+      E_UNKNOWN detail -> ERR: Unknown error code: E_UNKNOWN. detail
+      malformed -> ERR: Malformed error code: malformed
+      |}]
+
+  let%expect_test "parse_message_body round-trip" =
+    let body = Bytes.create 26 in
+    Stdlib.Bytes.set_int64_be body 0 1234567890L;
+    Stdlib.Bytes.set_uint16_be body 8 7;
+    Stdlib.Bytes.blit_string "0123456789abcdef" 0 body 10 16;
+    let body = Stdlib.Bytes.cat body (Bytes.of_string "hello") in
+    let r = parse_message_body body in
+    (match r with
+    | Ok (Message m) ->
+        Stdlib.print_endline
+          (Printf.sprintf "ts=%Ld attempts=%d id=%s body=%s" m.timestamp
+             m.attempts
+             (MessageID.to_string m.id)
+             (Bytes.to_string m.body))
+    | Ok _ -> Stdlib.print_endline "unexpected"
+    | Error e -> Stdlib.print_endline ("ERR: " ^ e));
+    [%expect {| ts=1234567890 attempts=7 id=0123456789abcdef body=hello |}]
+
+  let%expect_test "of_raw_frame" =
+    let frames =
+      [
+        { frame_type = 0l; data = Bytes.of_string "OK" };
+        { frame_type = 1l; data = Bytes.of_string "E_INVALID nope" };
+        { frame_type = 99l; data = Bytes.create 0 };
+      ]
+    in
+    List.iter frames ~f:(fun f ->
+        let r = of_raw_frame f in
+        let str =
+          match r with Ok m -> to_string m | Error e -> "ERR: " ^ e
+        in
+        Stdlib.print_endline (Printf.sprintf "type=%li -> %s" f.frame_type str));
+    [%expect
+      {|
+      type=0 -> OK
+      type=1 -> ErrorInvalid: nope
+      type=99 -> ERR: Unknown frame type: 99
+      |}]
 end
 
 module Lookup = struct
@@ -223,6 +308,33 @@ module Lookup = struct
     List.map
       ~f:(fun p -> Address.host_port p.broadcast_address p.tcp_port)
       lr.producers
+
+  let%expect_test "response_of_string" =
+    let json =
+      {|{"channels":["c1","c2"],"producers":[{"remote_address":"r","hostname":"h","broadcast_address":"127.0.0.1","tcp_port":4150,"http_port":4151,"version":"1.0"}]}|}
+    in
+    (match response_of_string json with
+    | Ok r ->
+        Stdlib.print_endline
+          (Printf.sprintf "channels=%d producers=%d"
+             (List.length r.channels) (List.length r.producers));
+        List.iter
+          ~f:(fun a -> Stdlib.print_endline (Address.to_string a))
+          (producer_addresses r)
+    | Error e -> Stdlib.print_endline ("ERR: " ^ e));
+    (match response_of_string "not-json" with
+    | Ok _ -> Stdlib.print_endline "unexpected ok"
+    | Error _ -> Stdlib.print_endline "malformed: error");
+    (match response_of_string "{}" with
+    | Ok _ -> Stdlib.print_endline "unexpected ok"
+    | Error _ -> Stdlib.print_endline "missing fields: error");
+    [%expect
+      {|
+      channels=2 producers=1
+      127.0.0.1:4150
+      malformed: error
+      missing fields: error
+      |}]
 end
 
 let log_and_return prefix r =
@@ -431,6 +543,8 @@ let%expect_test "bytes_of_command" =
       SUB (Topic "Test", Channel "Test");
       REQ (MessageID.of_bytes (Bytes.of_string "ABC"), 100L);
       FIN (MessageID.of_bytes (Bytes.of_string "ABC"));
+      PUB (Topic "Test", Bytes.of_string "Hello");
+      MPUB (Topic "Test", [ Bytes.of_string "A"; Bytes.of_string "BB" ]);
     ]
   in
   List.iter
@@ -439,25 +553,29 @@ let%expect_test "bytes_of_command" =
     commands;
   [%expect
     {|
-        00000000: 2020 5632
-        00000000: 4944 454e 5449 4659 0a00 0000 a87b 2268
-        00000001: 6561 7274 6265 6174 5f69 6e74 6572 7661
-        00000002: 6c22 3a35 3030 302c 2263 6c69 656e 745f
-        00000003: 6964 223a 2263 6c69 656e 7422 2c22 686f
-        00000004: 7374 6e61 6d65 223a 2268 6f73 746e 616d
-        00000005: 6522 2c22 7573 6572 5f61 6765 6e74 223a
-        00000006: 2275 7365 725f 6167 656e 7422 2c22 6f75
-        00000007: 7470 7574 5f62 7566 6665 725f 7369 7a65
-        00000008: 223a 3130 3234 2c22 6f75 7470 7574 5f62
-        00000009: 7566 6665 725f 7469 6d65 6f75 7422 3a31
-        00000010: 3030 302c 2273 616d 706c 655f 7261 7465
-        00000011: 223a 3530 7d
-        00000000: 4e4f 500a
-        00000000: 5244 5920 3130 0a
-        00000000: 5355 4220 5465 7374 2054 6573 740a
-        00000000: 5245 5120 4142 4320 3130 300a
-        00000000: 4649 4e20 4142 430a
-      |}]
+    00000000: 2020 5632
+    00000000: 4944 454e 5449 4659 0a00 0000 a87b 2268
+    00000001: 6561 7274 6265 6174 5f69 6e74 6572 7661
+    00000002: 6c22 3a35 3030 302c 2263 6c69 656e 745f
+    00000003: 6964 223a 2263 6c69 656e 7422 2c22 686f
+    00000004: 7374 6e61 6d65 223a 2268 6f73 746e 616d
+    00000005: 6522 2c22 7573 6572 5f61 6765 6e74 223a
+    00000006: 2275 7365 725f 6167 656e 7422 2c22 6f75
+    00000007: 7470 7574 5f62 7566 6665 725f 7369 7a65
+    00000008: 223a 3130 3234 2c22 6f75 7470 7574 5f62
+    00000009: 7566 6665 725f 7469 6d65 6f75 7422 3a31
+    00000010: 3030 302c 2273 616d 706c 655f 7261 7465
+    00000011: 223a 3530 7d
+    00000000: 4e4f 500a
+    00000000: 5244 5920 3130 0a
+    00000000: 5355 4220 5465 7374 2054 6573 740a
+    00000000: 5245 5120 4142 4320 3130 300a
+    00000000: 4649 4e20 4142 430a
+    00000000: 5055 4220 5465 7374 0a00 0000 0548 656c
+    00000001: 6c6f
+    00000000: 4d50 5542 2054 6573 740a 0000 0003 0000
+    00000001: 0002 0000 0001 4100 0000 0242 42
+    |}]
 
 (* A connection holds the underlying flow plus a buffered reader *)
 type conn = {
@@ -645,6 +763,30 @@ module Consumer = struct
           Milliseconds.of_seconds c.output_buffer_timeout;
         IdentifyConfig.sample_rate = c.sample_rate;
       }
+
+    let%expect_test "create validation" =
+      let show name r =
+        match r with
+        | Ok _ -> Stdlib.print_endline (name ^ " -> ok")
+        | Error _ -> Stdlib.print_endline (name ^ " -> error")
+      in
+      show "defaults" (create ());
+      show "max_in_flight=0" (create ~max_in_flight:0 ());
+      show "sample_rate=100" (create ~sample_rate:100 ());
+      show "sample_rate=99" (create ~sample_rate:99 ());
+      show "lookupd_poll_jitter=1.5" (create ~lookupd_poll_jitter:1.5 ());
+      show "client_id blank" (create ~client_id:"" ());
+      show "max_attempts=-1" (create ~max_attempts:(-1) ());
+      [%expect
+        {|
+        defaults -> ok
+        max_in_flight=0 -> error
+        sample_rate=100 -> error
+        sample_rate=99 -> ok
+        lookupd_poll_jitter=1.5 -> error
+        client_id blank -> error
+        max_attempts=-1 -> error
+        |}]
   end
 
   type net = [ `Generic ] Eio.Net.ty Eio.Resource.t
@@ -704,10 +846,42 @@ module Consumer = struct
           (Channel.to_string channel);
     }
 
+  let calc_rdy ~connection_count ~max_in_flight =
+    if connection_count = 0 || max_in_flight < connection_count then 1
+    else max_in_flight / connection_count
+
+  let%expect_test "calc_rdy" =
+    let cases =
+      [
+        (0, 10);
+        (1, 1);
+        (2, 1);
+        (2, 10);
+        (3, 10);
+        (4, 4);
+        (10, 100);
+      ]
+    in
+    List.iter cases ~f:(fun (connection_count, max_in_flight) ->
+        let r = calc_rdy ~connection_count ~max_in_flight in
+        Stdlib.print_endline
+          (Printf.sprintf "conns=%d max=%d -> %d" connection_count
+             max_in_flight r));
+    [%expect
+      {|
+      conns=0 max=10 -> 1
+      conns=1 max=1 -> 1
+      conns=2 max=1 -> 1
+      conns=2 max=10 -> 5
+      conns=3 max=10 -> 3
+      conns=4 max=4 -> 1
+      conns=10 max=100 -> 10
+      |}]
+
   let rdy_per_connection c =
-    let connection_count = Hash_set.length c.open_connections in
-    if connection_count = 0 || c.config.max_in_flight < connection_count then 1
-    else c.config.max_in_flight / connection_count
+    calc_rdy
+      ~connection_count:(Hash_set.length c.open_connections)
+      ~max_in_flight:c.config.max_in_flight
 
   let do_after_async ~sw ~clock ~duration f =
     Fiber.fork ~sw (fun () ->
@@ -741,6 +915,46 @@ module Consumer = struct
         else
           let delay = requeue_delay msg.attempts in
           REQ (msg.id, delay)
+
+  let%expect_test "handle_message" =
+    let mk_msg attempts =
+      {
+        timestamp = 0L;
+        attempts;
+        id = MessageID.of_bytes (Bytes.of_string "0123456789abcdef");
+        body = Bytes.of_string "data";
+      }
+    in
+    let show_cmd = function
+      | FIN _ -> "FIN"
+      | REQ (_, delay) ->
+          Printf.sprintf "REQ delay=%Ld" (Milliseconds.value delay)
+      | _ -> "OTHER"
+    in
+    let cases =
+      [
+        ("ok", (fun _ -> `Ok), mk_msg 1, 5);
+        ("requeue, attempts=1, max=5", (fun _ -> `Requeue), mk_msg 1, 5);
+        ("requeue, attempts=3, max=5", (fun _ -> `Requeue), mk_msg 3, 5);
+        ("requeue at max", (fun _ -> `Requeue), mk_msg 5, 5);
+        ("requeue past max", (fun _ -> `Requeue), mk_msg 10, 5);
+        ("handler raises", (fun _ -> failwith "boom"), mk_msg 1, 5);
+        ("handler raises at max", (fun _ -> failwith "boom"), mk_msg 5, 5);
+      ]
+    in
+    List.iter cases ~f:(fun (name, h, msg, max_attempts) ->
+        let r = handle_message h msg max_attempts in
+        Stdlib.print_endline (Printf.sprintf "%s -> %s" name (show_cmd r)));
+    [%expect
+      {|
+      ok -> FIN
+      requeue, attempts=1, max=5 -> REQ delay=5000
+      requeue, attempts=3, max=5 -> REQ delay=15000
+      requeue at max -> FIN
+      requeue past max -> FIN
+      handler raises -> REQ delay=5000
+      handler raises at max -> FIN
+      |}]
 
   let handle_server_message server_message handler max_attempts =
     let warn_return_none name msg =
@@ -778,51 +992,107 @@ module Consumer = struct
     in
     loop ()
 
-  let maybe_open_breaker ~sw c conn mbox bs =
-    let bs = { bs with error_count = bs.error_count + 1 } in
-    Logs.warn (fun l -> l "Handler returned error, count %d" bs.error_count);
-    if bs.error_count < c.config.error_threshold then bs
-    else begin
-      Logs.warn (fun l ->
-          l "Error threshold exceeded (%d of %d)" bs.error_count
-            c.config.error_threshold);
-      (* Send RDY 0 and send retry trial command after a delay  *)
-      Logs.debug (fun l -> l "Breaker open, sending RDY 0");
-      send ~clock:c.clock ~timeout:c.config.write_timeout ~conn (RDY 0);
-      let bs = { bs with position = Open } in
-      let duration =
-        backoff_duration ~multiplier:c.config.backoff_multiplier
-          ~error_count:bs.error_count
-      in
-      do_after_async ~sw ~clock:c.clock ~duration (fun () ->
-          Eio.Stream.add mbox TrialBreaker);
-      bs
-    end
+  type breaker_action =
+    | NoBreakerAction
+    | OpenBreaker of Seconds.t  (** send RDY 0 and schedule a trial after this delay *)
+    | CloseBreaker of int  (** trial passed, send this RDY *)
 
-  let update_breaker_state c conn open_breaker cmd bs =
+  (** Pure decision function for the breaker state machine. Returns the next
+      state and an action describing any side effect the caller must perform. *)
+  let next_breaker_state ~error_threshold ~backoff_multiplier ~rdy_when_closed
+      cmd bs =
     match cmd with
-    | NOP -> bs (* Receiving a NOP should not alter our state  *)
+    | NOP -> (bs, NoBreakerAction)
     | _ -> (
         let error_state = match cmd with REQ _ -> `Error | _ -> `Ok in
         match (error_state, bs.position) with
-        | `Error, Closed -> open_breaker bs
-        | `Error, Open -> bs
-        | `Error, HalfOpen ->
-            (* Failed test *)
-            open_breaker bs
-        | `Ok, Closed -> bs
-        | `Ok, Open -> bs
+        | `Error, (Closed | HalfOpen) ->
+            let bs = { bs with error_count = bs.error_count + 1 } in
+            if bs.error_count < error_threshold then (bs, NoBreakerAction)
+            else
+              let duration =
+                backoff_duration ~multiplier:backoff_multiplier
+                  ~error_count:bs.error_count
+              in
+              ({ bs with position = Open }, OpenBreaker duration)
+        | `Error, Open -> (bs, NoBreakerAction)
+        | `Ok, Closed -> (bs, NoBreakerAction)
+        | `Ok, Open -> (bs, NoBreakerAction)
         | `Ok, HalfOpen ->
-            (* Passed test  *)
-            let rdy = rdy_per_connection c in
-            Logs.debug (fun l ->
-                l "%s Trial passed, sending RDY %d" c.log_prefix rdy);
-            send ~clock:c.clock ~timeout:c.config.write_timeout ~conn (RDY rdy);
-            { position = Closed; error_count = 0 })
+            ({ position = Closed; error_count = 0 }, CloseBreaker rdy_when_closed))
+
+  let%expect_test "next_breaker_state" =
+    let next =
+      next_breaker_state ~error_threshold:3 ~backoff_multiplier:1.0
+        ~rdy_when_closed:5
+    in
+    let dummy_id = MessageID.of_bytes (Bytes.of_string "0123456789abcdef") in
+    let req = REQ (dummy_id, 0L) in
+    let fin = FIN dummy_id in
+    let show_pos = function
+      | Closed -> "Closed"
+      | HalfOpen -> "HalfOpen"
+      | Open -> "Open"
+    in
+    let show_action = function
+      | NoBreakerAction -> "NoAction"
+      | OpenBreaker d -> Printf.sprintf "OpenBreaker(%f)" (Seconds.value d)
+      | CloseBreaker n -> Printf.sprintf "CloseBreaker(%d)" n
+    in
+    let cases =
+      [
+        ("NOP keeps state", NOP, { position = Open; error_count = 99 });
+        ("Ok+Closed", fin, { position = Closed; error_count = 0 });
+        ("Ok+Open", fin, { position = Open; error_count = 5 });
+        ("Ok+HalfOpen closes", fin, { position = HalfOpen; error_count = 5 });
+        ("Err+Open", req, { position = Open; error_count = 5 });
+        ("Err+Closed below threshold", req, { position = Closed; error_count = 0 });
+        ("Err+Closed at threshold opens", req, { position = Closed; error_count = 2 });
+        ("Err+HalfOpen reopens", req, { position = HalfOpen; error_count = 2 });
+      ]
+    in
+    List.iter cases ~f:(fun (name, cmd, bs) ->
+        let bs', act = next cmd bs in
+        Stdlib.print_endline
+          (Printf.sprintf "%s -> {%s, %d} %s" name (show_pos bs'.position)
+             bs'.error_count (show_action act)));
+    [%expect
+      {|
+      NOP keeps state -> {Open, 99} NoAction
+      Ok+Closed -> {Closed, 0} NoAction
+      Ok+Open -> {Open, 5} NoAction
+      Ok+HalfOpen closes -> {Closed, 0} CloseBreaker(5)
+      Err+Open -> {Open, 5} NoAction
+      Err+Closed below threshold -> {Closed, 1} NoAction
+      Err+Closed at threshold opens -> {Open, 3} OpenBreaker(3.000000)
+      Err+HalfOpen reopens -> {Open, 3} OpenBreaker(3.000000)
+      |}]
+
+  let update_breaker_state ~sw c conn mbox cmd bs =
+    let rdy = rdy_per_connection c in
+    let new_bs, action =
+      next_breaker_state ~error_threshold:c.config.error_threshold
+        ~backoff_multiplier:c.config.backoff_multiplier ~rdy_when_closed:rdy
+        cmd bs
+    in
+    (match action with
+    | NoBreakerAction -> ()
+    | OpenBreaker duration ->
+        Logs.warn (fun l ->
+            l "Error threshold exceeded (%d of %d)" new_bs.error_count
+              c.config.error_threshold);
+        Logs.debug (fun l -> l "Breaker open, sending RDY 0");
+        send ~clock:c.clock ~timeout:c.config.write_timeout ~conn (RDY 0);
+        do_after_async ~sw ~clock:c.clock ~duration (fun () ->
+            Eio.Stream.add mbox TrialBreaker)
+    | CloseBreaker rdy ->
+        Logs.debug (fun l ->
+            l "%s Trial passed, sending RDY %d" c.log_prefix rdy);
+        send ~clock:c.clock ~timeout:c.config.write_timeout ~conn (RDY rdy));
+    new_bs
 
   let consume ~sw c conn mbox =
-    let maybe_open_breaker = maybe_open_breaker ~sw c conn mbox in
-    let update_breaker_state = update_breaker_state c conn maybe_open_breaker in
+    let update_breaker_state = update_breaker_state ~sw c conn mbox in
     let send = send ~clock:c.clock ~timeout:c.config.write_timeout ~conn in
     let rec mbox_loop bs =
       let taken = Eio.Stream.take mbox in
