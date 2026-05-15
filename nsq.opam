@@ -23,6 +23,7 @@ depends: [
   "ppx_deriving_yojson"
   "ppx_jane"
   "logs"
+  "fmt"
   "hex"
   "alcotest" {with-test}
 ]
