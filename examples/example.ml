@@ -56,8 +56,7 @@ let () =
   let clock = Eio.Stdenv.clock env in
   Switch.run @@ fun sw ->
   let consumer =
-    create_consumer ~net ~clock ~mode:`Nsqd "nsq_consumer"
-      (make_handler "nsq")
+    create_consumer ~net ~clock ~mode:`Nsqd "nsq_consumer" (make_handler "nsq")
   in
   let l_consumer =
     create_consumer ~net ~clock ~mode:`Lookupd "lookupd_consumer"

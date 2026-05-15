@@ -204,9 +204,7 @@ module ServerMessage = struct
     let cases = [ "OK"; "_heartbeat_"; "wat" ] in
     List.iter cases ~f:(fun s ->
         let r = parse_response_body (Bytes.of_string s) in
-        let str =
-          match r with Ok m -> to_string m | Error e -> "ERR: " ^ e
-        in
+        let str = match r with Ok m -> to_string m | Error e -> "ERR: " ^ e in
         Stdlib.print_endline (Printf.sprintf "%s -> %s" s str));
     [%expect
       {|
@@ -230,9 +228,7 @@ module ServerMessage = struct
     in
     List.iter cases ~f:(fun s ->
         let r = parse_error_body (Bytes.of_string s) in
-        let str =
-          match r with Ok m -> to_string m | Error e -> "ERR: " ^ e
-        in
+        let str = match r with Ok m -> to_string m | Error e -> "ERR: " ^ e in
         Stdlib.print_endline (Printf.sprintf "%s -> %s" s str));
     [%expect
       {|
@@ -257,9 +253,7 @@ module ServerMessage = struct
     | Ok (Message m) ->
         Stdlib.print_endline
           (Printf.sprintf "ts=%Ld attempts=%d id=%s body=%s" m.timestamp
-             m.attempts
-             (MessageID.to_string m.id)
-             (Bytes.to_string m.body))
+             m.attempts (MessageID.to_string m.id) (Bytes.to_string m.body))
     | Ok _ -> Stdlib.print_endline "unexpected"
     | Error e -> Stdlib.print_endline ("ERR: " ^ e));
     [%expect {| ts=1234567890 attempts=7 id=0123456789abcdef body=hello |}]
@@ -274,9 +268,7 @@ module ServerMessage = struct
     in
     List.iter frames ~f:(fun f ->
         let r = of_raw_frame f in
-        let str =
-          match r with Ok m -> to_string m | Error e -> "ERR: " ^ e
-        in
+        let str = match r with Ok m -> to_string m | Error e -> "ERR: " ^ e in
         Stdlib.print_endline (Printf.sprintf "type=%li -> %s" f.frame_type str));
     [%expect
       {|
@@ -316,8 +308,8 @@ module Lookup = struct
     (match response_of_string json with
     | Ok r ->
         Stdlib.print_endline
-          (Printf.sprintf "channels=%d producers=%d"
-             (List.length r.channels) (List.length r.producers));
+          (Printf.sprintf "channels=%d producers=%d" (List.length r.channels)
+             (List.length r.producers));
         List.iter
           ~f:(fun a -> Stdlib.print_endline (Address.to_string a))
           (producer_addresses r)
@@ -594,8 +586,7 @@ let send ~clock ~timeout ~conn command =
   maybe_timeout ~clock ~timeout (fun () ->
       Eio.Flow.copy_string (Bytes.to_string data) conn.flow)
 
-let catch_result f =
-  try Ok (f ()) with e -> Error (Exn.to_string e)
+let catch_result f = try Ok (f ()) with e -> Error (Exn.to_string e)
 
 let connect ~sw ~net ~clock host timeout =
   let host, port =
@@ -693,7 +684,8 @@ module Consumer = struct
       in
       let string_not_blank s = String.is_empty s |> not in
       V.of_list
-        (Fields.fold ~init:[] ~max_in_flight:(w Core.Int.validate_positive)
+        (Fields.fold ~init:[]
+           ~max_in_flight:(w Core.Int.validate_positive)
            ~max_attempts:(w (bound_int ~min:0 ~max:65535))
            ~dial_timeout:(w (bound_float ~min:0.1 ~max:300.0))
            ~read_timeout:(w (bound_float ~min:0.1 ~max:300.0))
@@ -832,8 +824,8 @@ module Consumer = struct
       channel handler =
     let open_connections = Hash_set.create (module Address) in
     {
-      net = (net :> net);
-      clock = (clock :> clock);
+      net :> net;
+      clock :> clock;
       addresses;
       open_connections;
       topic;
@@ -852,21 +844,13 @@ module Consumer = struct
 
   let%expect_test "calc_rdy" =
     let cases =
-      [
-        (0, 10);
-        (1, 1);
-        (2, 1);
-        (2, 10);
-        (3, 10);
-        (4, 4);
-        (10, 100);
-      ]
+      [ (0, 10); (1, 1); (2, 1); (2, 10); (3, 10); (4, 4); (10, 100) ]
     in
     List.iter cases ~f:(fun (connection_count, max_in_flight) ->
         let r = calc_rdy ~connection_count ~max_in_flight in
         Stdlib.print_endline
-          (Printf.sprintf "conns=%d max=%d -> %d" connection_count
-             max_in_flight r));
+          (Printf.sprintf "conns=%d max=%d -> %d" connection_count max_in_flight
+             r));
     [%expect
       {|
       conns=0 max=10 -> 1
@@ -909,7 +893,8 @@ module Consumer = struct
         if msg.attempts >= max_attempts then begin
           Logs.warn (fun l ->
               l "Discarding message %s as reached max attempts, %d"
-                (MessageID.to_string msg.id) msg.attempts);
+                (MessageID.to_string msg.id)
+                msg.attempts);
           FIN msg.id
         end
         else
@@ -994,7 +979,8 @@ module Consumer = struct
 
   type breaker_action =
     | NoBreakerAction
-    | OpenBreaker of Seconds.t  (** send RDY 0 and schedule a trial after this delay *)
+    | OpenBreaker of Seconds.t
+        (** send RDY 0 and schedule a trial after this delay *)
     | CloseBreaker of int  (** trial passed, send this RDY *)
 
   (** Pure decision function for the breaker state machine. Returns the next
@@ -1019,7 +1005,8 @@ module Consumer = struct
         | `Ok, Closed -> (bs, NoBreakerAction)
         | `Ok, Open -> (bs, NoBreakerAction)
         | `Ok, HalfOpen ->
-            ({ position = Closed; error_count = 0 }, CloseBreaker rdy_when_closed))
+            ( { position = Closed; error_count = 0 },
+              CloseBreaker rdy_when_closed ))
 
   let%expect_test "next_breaker_state" =
     let next =
@@ -1046,8 +1033,12 @@ module Consumer = struct
         ("Ok+Open", fin, { position = Open; error_count = 5 });
         ("Ok+HalfOpen closes", fin, { position = HalfOpen; error_count = 5 });
         ("Err+Open", req, { position = Open; error_count = 5 });
-        ("Err+Closed below threshold", req, { position = Closed; error_count = 0 });
-        ("Err+Closed at threshold opens", req, { position = Closed; error_count = 2 });
+        ( "Err+Closed below threshold",
+          req,
+          { position = Closed; error_count = 0 } );
+        ( "Err+Closed at threshold opens",
+          req,
+          { position = Closed; error_count = 2 } );
         ("Err+HalfOpen reopens", req, { position = HalfOpen; error_count = 2 });
       ]
     in
@@ -1072,8 +1063,8 @@ module Consumer = struct
     let rdy = rdy_per_connection c in
     let new_bs, action =
       next_breaker_state ~error_threshold:c.config.error_threshold
-        ~backoff_multiplier:c.config.backoff_multiplier ~rdy_when_closed:rdy
-        cmd bs
+        ~backoff_multiplier:c.config.backoff_multiplier ~rdy_when_closed:rdy cmd
+        bs
     in
     (match action with
     | NoBreakerAction -> ()
@@ -1119,8 +1110,8 @@ module Consumer = struct
           mbox_loop new_state
       | TrialBreaker ->
           Logs.debug (fun l ->
-              l "%s Breaker trial, sending RDY 1 (Error count: %i)"
-                c.log_prefix bs.error_count);
+              l "%s Breaker trial, sending RDY 1 (Error count: %i)" c.log_prefix
+                bs.error_count);
           let bs = { bs with position = HalfOpen } in
           send (RDY 1);
           mbox_loop bs
@@ -1180,7 +1171,8 @@ module Consumer = struct
           (* Error connecting *)
           Logs.err (fun l ->
               l "%s Connecting to consumer '%s': %s" c.log_prefix
-                (Address.to_string address) e);
+                (Address.to_string address)
+                e);
           let error_count = error_count + 1 in
           let stop_connecting =
             match c.mode with
@@ -1204,14 +1196,12 @@ module Consumer = struct
     in
     loop 0
 
-  (**
-    Start a fiber to update RDY count occasionally.
-    The number of open connections can change as we add new consumers due to lookupd
-    discovering producers or we have connection failures. Each time a new connection
-    is opened or closed the consumer.nsqd_connections field is updated.
-    We therefore need to occasionally update our RDY count as this may have changed so that
-    it is spread evenly across connections.
-  *)
+  (** Start a fiber to update RDY count occasionally. The number of open
+      connections can change as we add new consumers due to lookupd discovering
+      producers or we have connection failures. Each time a new connection is
+      opened or closed the consumer.nsqd_connections field is updated. We
+      therefore need to occasionally update our RDY count as this may have
+      changed so that it is spread evenly across connections. *)
   let start_ready_calculator ~sw c mbox =
     let jitter = Random.float (recalculate_rdy_interval /. 10.0) in
     let interval = recalculate_rdy_interval +. jitter in
@@ -1281,19 +1271,13 @@ module Consumer = struct
         Logs.debug (fun l -> l "Starting lookupd poller");
         start_polling_lookupd ~sw c
     | `Nsqd ->
-        Fiber.List.iter
-          (fun a -> start_nsqd_consumer ~sw c a)
-          c.addresses
+        Fiber.List.iter (fun a -> start_nsqd_consumer ~sw c a) c.addresses
 end
 
 module Producer = struct
   type net = [ `Generic ] Eio.Net.ty Eio.Resource.t
   type clock = float Eio.Time.clock_ty Eio.Resource.t
-
-  type connection = {
-    conn : conn;
-    mutable last_write : float;
-  }
+  type connection = { conn : conn; mutable last_write : float }
 
   type t = {
     net : net;
@@ -1307,10 +1291,9 @@ module Producer = struct
   let default_write_timeout = Seconds.of_float 15.0
   let default_read_timeout = Seconds.of_float 15.0
 
-  (** Throw away connections that are idle for this long
-       Note that NSQ expects hearbeats to be answered every 30 seconds
-       and if two are missed it closes the connection.
-  *)
+  (** Throw away connections that are idle for this long Note that NSQ expects
+      hearbeats to be answered every 30 seconds and if two are missed it closes
+      the connection. *)
   let ttl_seconds = 50.0
 
   let create_pool ~sw ~net ~clock address size =

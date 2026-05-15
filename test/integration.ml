@@ -22,7 +22,8 @@ let test_publish_and_consume env () =
   let c = Consumer.create ~net ~clock [ address ] topic channel handler in
   let test () =
     let p =
-      Producer.create ~sw ~net ~clock address |> check_result "Creating producer"
+      Producer.create ~sw ~net ~clock address
+      |> check_result "Creating producer"
     in
     (* Send single payload *)
     let res = Producer.publish p topic payload in
