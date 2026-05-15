@@ -5,5 +5,5 @@
   (flags (-show-counts)))
  (preprocess
   (pps ppx_deriving_yojson ppx_jane))
- (libraries base core stdio lwt integers lwt.unix cohttp-lwt-unix yojson
-   ppx_deriving_yojson.runtime hex))
+ (libraries base core stdio eio eio.unix integers cohttp cohttp-eio yojson
+   ppx_deriving_yojson.runtime hex logs))

@@ -1,6 +1,5 @@
 open Base
-open Lwt
-open Lwt.Syntax
+open Eio.Std
 
 let client_version = "0.5.3"
 let default_nsqd_port = 4150
@@ -228,12 +227,12 @@ end
 
 let log_and_return prefix r =
   match r with
-  | Ok _ as ok -> return ok
+  | Ok _ as ok -> ok
   | Error s as error ->
-      let* () = Logs_lwt.err (fun l -> l "%s: %s" prefix s) in
-      return error
+      Logs.err (fun l -> l "%s: %s" prefix s);
+      error
 
-let query_nsqlookupd ~topic a =
+let query_nsqlookupd ~http_client ~sw ~topic a =
   let host, port =
     match a with
     | Address.Host h -> (h, default_lookupd_port)
@@ -245,23 +244,23 @@ let query_nsqlookupd ~topic a =
       ~query:[ ("topic", [ topic_string ]) ]
       ()
   in
-  let open Cohttp in
-  catch
-    (fun () ->
-      let* resp, body = Cohttp_lwt_unix.Client.get uri in
-      match Response.status resp with
-      | `OK ->
-          let* body = Cohttp_lwt.Body.to_string body in
-          log_and_return "Error parsing lookup response"
-            (Lookup.response_of_string body)
-      | status ->
-          return_error
-            (Printf.sprintf "Expected %s, got %s"
-               (Code.string_of_status `OK)
-               (Code.string_of_status status)))
-    (fun e ->
-      let s = Exn.to_string e in
-      log_and_return "Querying lookupd" (Error s))
+  try
+    let resp, body = Cohttp_eio.Client.get http_client ~sw uri in
+    match Http.Response.status resp with
+    | `OK ->
+        let body_str =
+          Eio.Buf_read.(parse_exn take_all) body ~max_size:Int.max_value
+        in
+        log_and_return "Error parsing lookup response"
+          (Lookup.response_of_string body_str)
+    | status ->
+        Error
+          (Printf.sprintf "Expected %s, got %s"
+             (Http.Status.to_string `OK)
+             (Http.Status.to_string status))
+  with e ->
+    let s = Exn.to_string e in
+    log_and_return "Querying lookupd" (Error s)
 
 (* Buffer shared between functions that produce packets *)
 let shared_buffer = Buffer.create 1000000
@@ -460,38 +459,47 @@ let%expect_test "bytes_of_command" =
         00000000: 4649 4e20 4142 430a
       |}]
 
+(* A connection holds the underlying flow plus a buffered reader *)
+type conn = {
+  flow : [ `Generic ] Eio.Net.stream_socket_ty Eio.Resource.t;
+  reader : Eio.Buf_read.t;
+}
+
 (* Timeout will only apply if > 0.0 *)
-let maybe_timeout ~timeout f =
+let maybe_timeout ~clock ~timeout f =
   let timeout = Seconds.value timeout in
-  if Float.(timeout <= 0.0) then f () else Lwt_unix.with_timeout timeout f
+  if Float.(timeout <= 0.0) then f ()
+  else Eio.Time.with_timeout_exn clock timeout f
 
-let send ~timeout ~conn command =
-  let oc = snd conn in
+let send ~clock ~timeout ~conn command =
   let data = bytes_of_command command in
-  maybe_timeout ~timeout (fun () ->
-      Lwt_io.write_from_exactly oc data 0 (Bytes.length data))
+  maybe_timeout ~clock ~timeout (fun () ->
+      Eio.Flow.copy_string (Bytes.to_string data) conn.flow)
 
-let catch_result promise =
-  try_bind promise
-    (fun x -> return_ok x)
-    (fun e -> return_error (Exn.to_string e))
+let catch_result f =
+  try Ok (f ()) with e -> Error (Exn.to_string e)
 
-let catch_result1 f x = catch_result (fun () -> f x)
-
-let connect host timeout =
+let connect ~sw ~net ~clock host timeout =
   let host, port =
     match host with
     | Address.Host h -> (h, default_nsqd_port)
     | Address.HostPort (h, p) -> (h, p)
   in
-  let* info = Lwt_unix.gethostbyname host in
-  let host = Array.random_element_exn info.h_addr_list in
-  let addr = Unix.ADDR_INET (host, port) in
-  maybe_timeout ~timeout (fun () ->
-      Lwt_io.open_connection
-        ~in_buffer:(Lwt_bytes.create network_buffer_size)
-        ~out_buffer:(Lwt_bytes.create network_buffer_size)
-        addr)
+  let addrs =
+    Eio.Net.getaddrinfo_stream net host ~service:(Int.to_string port)
+  in
+  let addr =
+    match addrs with
+    | [] -> failwith (Printf.sprintf "No addresses for %s" host)
+    | xs -> List.random_element_exn xs
+  in
+  maybe_timeout ~clock ~timeout (fun () ->
+      let flow = Eio.Net.connect ~sw net addr in
+      let reader =
+        Eio.Buf_read.of_flow ~initial_size:network_buffer_size
+          ~max_size:Int.max_value flow
+      in
+      { flow; reader })
 
 let frame_from_bytes bytes =
   let frame_type = Stdlib.Bytes.get_int32_be bytes 0 in
@@ -499,30 +507,30 @@ let frame_from_bytes bytes =
   let data = Bytes.sub ~pos:4 ~len:to_read bytes in
   { frame_type; data }
 
-let read_raw_frame ~timeout (ic, _) =
-  let* size = Lwt_io.BE.read_int32 ic in
-  let size = Int32.to_int_exn size in
+let read_raw_frame ~clock ~timeout conn =
+  let size = Eio.Buf_read.BE.uint32 conn.reader |> Int32.to_int_exn in
   let bytes = Bytes.create size in
-  let* () =
-    maybe_timeout ~timeout (fun () -> Lwt_io.read_into_exactly ic bytes 0 size)
-  in
-  return (frame_from_bytes bytes)
+  maybe_timeout ~clock ~timeout (fun () ->
+      let s = Eio.Buf_read.take size conn.reader in
+      Stdlib.Bytes.blit_string s 0 bytes 0 size);
+  frame_from_bytes bytes
 
-let send_expect_ok ~read_timeout ~write_timeout ~conn cmd =
-  let* () = send ~timeout:write_timeout ~conn cmd in
-  let* raw = read_raw_frame ~timeout:read_timeout conn in
+let send_expect_ok ~clock ~read_timeout ~write_timeout ~conn cmd =
+  send ~clock ~timeout:write_timeout ~conn cmd;
+  let raw = read_raw_frame ~clock ~timeout:read_timeout conn in
   match ServerMessage.of_raw_frame raw with
-  | Ok ResponseOk -> return_unit
+  | Ok ResponseOk -> ()
   | Ok sm ->
       failwith
         (Printf.sprintf "Expected OK, got %s" (ServerMessage.to_string sm))
   | Error e -> failwith (Printf.sprintf "Expected OK, got %s" e)
 
-let subscribe ~read_timeout ~write_timeout ~conn topic channel =
-  send_expect_ok ~read_timeout ~write_timeout ~conn (SUB (topic, channel))
+let subscribe ~clock ~read_timeout ~write_timeout ~conn topic channel =
+  send_expect_ok ~clock ~read_timeout ~write_timeout ~conn
+    (SUB (topic, channel))
 
-let identify ~read_timeout ~write_timeout ~conn ic =
-  send_expect_ok ~read_timeout ~write_timeout ~conn (IDENTIFY ic)
+let identify ~clock ~read_timeout ~write_timeout ~conn ic =
+  send_expect_ok ~clock ~read_timeout ~write_timeout ~conn (IDENTIFY ic)
 
 module Consumer = struct
   module Config = struct
@@ -639,13 +647,18 @@ module Consumer = struct
       }
   end
 
+  type net = [ `Generic ] Eio.Net.ty Eio.Resource.t
+  type clock = float Eio.Time.clock_ty Eio.Resource.t
+
   type t = {
+    net : net;
+    clock : clock;
     addresses : Address.t list;
     (* The number of open NSQD connections *)
     open_connections : Address.t Hash_set.t;
     topic : Topic.t;
     channel : Channel.t;
-    handler : bytes -> [ `Ok | `Requeue ] Lwt.t;
+    handler : bytes -> [ `Ok | `Requeue ];
     config : Config.t;
     mode : [ `Nsqd | `Lookupd ];
     log_prefix : string;
@@ -672,11 +685,13 @@ module Consumer = struct
       Case 1: Backoff = 2.000000
       Case 2: Backoff = 600.000000 |}]
 
-  let create ?(mode = `Nsqd)
+  let create ~net ~clock ?(mode = `Nsqd)
       ?(config = Config.create () |> Result.ok_or_failwith) addresses topic
       channel handler =
     let open_connections = Hash_set.create (module Address) in
     {
+      net = (net :> net);
+      clock = (clock :> clock);
       addresses;
       open_connections;
       topic;
@@ -694,13 +709,11 @@ module Consumer = struct
     if connection_count = 0 || c.config.max_in_flight < connection_count then 1
     else c.config.max_in_flight / connection_count
 
-  let do_after_async ~duration f =
-    async (fun () ->
-        let* () =
-          Logs_lwt.debug (fun l ->
-              l "Sleeping for %f seconds" (Seconds.value duration))
-        in
-        let* () = Lwt_unix.sleep (Seconds.value duration) in
+  let do_after_async ~sw ~clock ~duration f =
+    Fiber.fork ~sw (fun () ->
+        Logs.debug (fun l ->
+            l "Sleeping for %f seconds" (Seconds.value duration));
+        Eio.Time.sleep clock (Seconds.value duration);
         f ())
 
   let handle_message handler msg max_attempts =
@@ -709,50 +722,45 @@ module Consumer = struct
       let attempts = Int64.of_int_exn attempts in
       Milliseconds.of_int64 Int64.(d * attempts)
     in
-    let* handler_result =
-      let* res = catch_result1 handler msg.body in
-      match res with
-      | Ok r -> return r
+    let handler_result =
+      match catch_result (fun () -> handler msg.body) with
+      | Ok r -> r
       | Error s ->
-          let* () = Logs_lwt.err (fun l -> l "Handler error: %s" s) in
-          return `Requeue
+          Logs.err (fun l -> l "Handler error: %s" s);
+          `Requeue
     in
     match handler_result with
-    | `Ok -> return (FIN msg.id)
+    | `Ok -> FIN msg.id
     | `Requeue ->
         let attempts = Unsigned.UInt16.to_int msg.attempts in
-        if attempts >= max_attempts then
-          let* () =
-            Logs_lwt.warn (fun l ->
-                l "Discarding message %s as reached max attempts, %d"
-                  (MessageID.to_string msg.id)
-                  attempts)
-          in
-          return (FIN msg.id)
+        if attempts >= max_attempts then begin
+          Logs.warn (fun l ->
+              l "Discarding message %s as reached max attempts, %d"
+                (MessageID.to_string msg.id) attempts);
+          FIN msg.id
+        end
         else
           let delay = requeue_delay attempts in
-          return (REQ (msg.id, delay))
+          REQ (msg.id, delay)
 
   let handle_server_message server_message handler max_attempts =
     let warn_return_none name msg =
-      let* () = Logs_lwt.warn (fun l -> l "%s: %s" name msg) in
-      return_none
+      Logs.warn (fun l -> l "%s: %s" name msg);
+      None
     in
     let open ServerMessage in
     match server_message with
-    | ResponseOk -> return_none
+    | ResponseOk -> None
     | Heartbeat ->
-        let* () = Logs_lwt.debug (fun l -> l "Received heartbeat") in
-        return_some NOP
+        Logs.debug (fun l -> l "Received heartbeat");
+        Some NOP
     | ErrorInvalid s -> warn_return_none "ErrorInvalid" s
     | ErrorBadTopic s -> warn_return_none "ErrorBadTopic" s
     | ErrorBadChannel s -> warn_return_none "ErrorBadChannel" s
     | ErrorFINFailed s -> warn_return_none "ErrorFINFailed" s
     | ErrorREQFailed s -> warn_return_none "ErrorREQFailed" s
     | ErrorTOUCHFailed s -> warn_return_none "ErrorTOUCHFailed" s
-    | Message msg ->
-        let* cmd = handle_message handler msg max_attempts in
-        return_some cmd
+    | Message msg -> Some (handle_message handler msg max_attempts)
 
   type loop_message =
     | RawFrame of raw_frame
@@ -761,104 +769,91 @@ module Consumer = struct
     | ConnectionError of string
     | RecalcRDY
 
-  let read_loop ~timeout conn mbox =
-    let put_async m = async (fun () -> Lwt_mvar.put mbox m) in
+  let read_loop ~clock ~timeout conn mbox =
     let rec loop () =
-      let* res = catch_result1 (read_raw_frame ~timeout) conn in
-      match res with
+      match catch_result (fun () -> read_raw_frame ~clock ~timeout conn) with
       | Ok raw ->
-          put_async (RawFrame raw);
+          Eio.Stream.add mbox (RawFrame raw);
           loop ()
-      | Error s ->
-          put_async (ConnectionError s);
-          return_unit
+      | Error s -> Eio.Stream.add mbox (ConnectionError s)
     in
     loop ()
 
-  let maybe_open_breaker c conn mbox bs =
+  let maybe_open_breaker ~sw c conn mbox bs =
     let bs = { bs with error_count = bs.error_count + 1 } in
-    let* () =
-      Logs_lwt.warn (fun l ->
-          l "Handler returned error, count %d" bs.error_count)
-    in
-    if bs.error_count < c.config.error_threshold then return bs
-    else
-      let* () =
-        Logs_lwt.warn (fun l ->
-            l "Error threshold exceeded (%d of %d)" bs.error_count
-              c.config.error_threshold)
-      in
+    Logs.warn (fun l -> l "Handler returned error, count %d" bs.error_count);
+    if bs.error_count < c.config.error_threshold then bs
+    else begin
+      Logs.warn (fun l ->
+          l "Error threshold exceeded (%d of %d)" bs.error_count
+            c.config.error_threshold);
       (* Send RDY 0 and send retry trial command after a delay  *)
-      let* () = Logs_lwt.debug (fun l -> l "Breaker open, sending RDY 0") in
-      let* () = send ~timeout:c.config.write_timeout ~conn (RDY 0) in
+      Logs.debug (fun l -> l "Breaker open, sending RDY 0");
+      send ~clock:c.clock ~timeout:c.config.write_timeout ~conn (RDY 0);
       let bs = { bs with position = Open } in
       let duration =
         backoff_duration ~multiplier:c.config.backoff_multiplier
           ~error_count:bs.error_count
       in
-      do_after_async ~duration (fun () -> Lwt_mvar.put mbox TrialBreaker);
-      return bs
+      do_after_async ~sw ~clock:c.clock ~duration (fun () ->
+          Eio.Stream.add mbox TrialBreaker);
+      bs
+    end
 
   let update_breaker_state c conn open_breaker cmd bs =
     match cmd with
-    | NOP -> return bs (* Receiving a NOP should not alter our state  *)
+    | NOP -> bs (* Receiving a NOP should not alter our state  *)
     | _ -> (
         let error_state = match cmd with REQ _ -> `Error | _ -> `Ok in
         match (error_state, bs.position) with
         | `Error, Closed -> open_breaker bs
-        | `Error, Open -> return bs
+        | `Error, Open -> bs
         | `Error, HalfOpen ->
             (* Failed test *)
             open_breaker bs
-        | `Ok, Closed -> return bs
-        | `Ok, Open -> return bs
+        | `Ok, Closed -> bs
+        | `Ok, Open -> bs
         | `Ok, HalfOpen ->
             (* Passed test  *)
             let rdy = rdy_per_connection c in
-            let* () =
-              Logs_lwt.debug (fun l ->
-                  l "%s Trial passed, sending RDY %d" c.log_prefix rdy)
-            in
-            let* () = send ~timeout:c.config.write_timeout ~conn (RDY rdy) in
-            return { position = Closed; error_count = 0 })
+            Logs.debug (fun l ->
+                l "%s Trial passed, sending RDY %d" c.log_prefix rdy);
+            send ~clock:c.clock ~timeout:c.config.write_timeout ~conn (RDY rdy);
+            { position = Closed; error_count = 0 })
 
-  let consume c conn mbox =
-    let maybe_open_breaker = maybe_open_breaker c conn mbox in
+  let consume ~sw c conn mbox =
+    let maybe_open_breaker = maybe_open_breaker ~sw c conn mbox in
     let update_breaker_state = update_breaker_state c conn maybe_open_breaker in
-    let send = send ~timeout:c.config.write_timeout ~conn in
+    let send = send ~clock:c.clock ~timeout:c.config.write_timeout ~conn in
     let rec mbox_loop bs =
-      let* taken = Lwt_mvar.take mbox in
+      let taken = Eio.Stream.take mbox in
       match taken with
       | RawFrame raw -> (
           match ServerMessage.of_raw_frame raw with
           | Ok server_message ->
-              async (fun () ->
-                  let* resp =
+              Fiber.fork ~sw (fun () ->
+                  let resp =
                     handle_server_message server_message c.handler
                       c.config.max_attempts
                   in
                   match resp with
-                  | Some c -> Lwt_mvar.put mbox (Command c)
-                  | None -> return_unit);
+                  | Some c -> Eio.Stream.add mbox (Command c)
+                  | None -> ());
               mbox_loop bs
           | Error s ->
-              let* () =
-                Logs_lwt.err (fun l ->
-                    l "%s Error parsing response: %s" c.log_prefix s)
-              in
+              Logs.err (fun l ->
+                  l "%s Error parsing response: %s" c.log_prefix s);
               mbox_loop bs)
       | Command cmd ->
-          let* () = send cmd in
-          let* new_state = update_breaker_state cmd bs in
+          send cmd;
+          let new_state = update_breaker_state cmd bs in
           mbox_loop new_state
       | TrialBreaker ->
-          let* () =
-            Logs_lwt.debug (fun l ->
-                l "%s Breaker trial, sending RDY 1 (Error count: %i)"
-                  c.log_prefix bs.error_count)
-          in
+          Logs.debug (fun l ->
+              l "%s Breaker trial, sending RDY 1 (Error count: %i)"
+                c.log_prefix bs.error_count);
           let bs = { bs with position = HalfOpen } in
-          let* () = send (RDY 1) in
+          send (RDY 1);
           mbox_loop bs
       | ConnectionError s -> failwith s
       | RecalcRDY -> (
@@ -868,73 +863,55 @@ module Consumer = struct
           | HalfOpen -> mbox_loop bs
           | Closed ->
               let rdy = rdy_per_connection c in
-              let* () =
-                Logs_lwt.debug (fun l ->
-                    l "%s Sending recalculated RDY %d" c.log_prefix rdy)
-              in
-              let* () = send (RDY rdy) in
+              Logs.debug (fun l ->
+                  l "%s Sending recalculated RDY %d" c.log_prefix rdy);
+              send (RDY rdy);
               mbox_loop bs)
     in
-    let* () = send MAGIC in
+    send MAGIC;
     let ic = Config.to_identity_config c.config in
-    let* () =
-      identify ~read_timeout:c.config.read_timeout
-        ~write_timeout:c.config.write_timeout ~conn ic
-    in
-    let* () =
-      subscribe ~read_timeout:c.config.read_timeout
-        ~write_timeout:c.config.write_timeout ~conn c.topic c.channel
-    in
+    identify ~clock:c.clock ~read_timeout:c.config.read_timeout
+      ~write_timeout:c.config.write_timeout ~conn ic;
+    subscribe ~clock:c.clock ~read_timeout:c.config.read_timeout
+      ~write_timeout:c.config.write_timeout ~conn c.topic c.channel;
     (* Start cautiously by sending RDY 1 *)
-    let* () =
-      Logs_lwt.debug (fun l -> l "%s Sending initial RDY 1" c.log_prefix)
-    in
-    let* () = send (RDY 1) in
+    Logs.debug (fun l -> l "%s Sending initial RDY 1" c.log_prefix);
+    send (RDY 1);
     (* Start background reader *)
-    async (fun () -> read_loop ~timeout:c.config.read_timeout conn mbox);
+    Fiber.fork ~sw (fun () ->
+        read_loop ~clock:c.clock ~timeout:c.config.read_timeout conn mbox);
     let initial_state = { position = HalfOpen; error_count = 0 } in
     mbox_loop initial_state
 
   let connection_loop c address mbox =
     let rec loop error_count =
-      let* conn =
-        catch_result (fun () -> connect address c.config.dial_timeout)
+      Switch.run @@ fun sw ->
+      let conn =
+        catch_result (fun () ->
+            connect ~sw ~net:c.net ~clock:c.clock address c.config.dial_timeout)
       in
       match conn with
       | Ok conn ->
-          let handle_exn e =
-            Lwt.join
-              [
-                Logs_lwt.err (fun l -> l "Consumer error: %s" (Exn.to_string e));
-                Lwt_io.close (fst conn);
-                Lwt_io.close (snd conn);
-                Lwt_unix.sleep default_backoff;
-              ]
-          in
           Hash_set.add c.open_connections address;
-          let* () =
-            Logs_lwt.debug (fun l ->
-                l "%s %d connections" c.log_prefix
-                  (Hash_set.length c.open_connections))
-          in
-          let* () = catch (fun () -> consume c conn mbox) handle_exn in
+          Logs.debug (fun l ->
+              l "%s %d connections" c.log_prefix
+                (Hash_set.length c.open_connections));
+          (try consume ~sw c conn mbox
+           with e ->
+             Logs.err (fun l -> l "Consumer error: %s" (Exn.to_string e));
+             Eio.Time.sleep c.clock (Seconds.value default_backoff));
           (* Error consuming. If we get here it means that something failed and we need to reconnect *)
           Hash_set.remove c.open_connections address;
-          let* () =
-            Logs_lwt.debug (fun l ->
-                l "%s %d connections" c.log_prefix
-                  (Hash_set.length c.open_connections))
-          in
+          Logs.debug (fun l ->
+              l "%s %d connections" c.log_prefix
+                (Hash_set.length c.open_connections));
           let error_count = 1 in
           loop error_count
       | Error e ->
           (* Error connecting *)
-          let* () =
-            Logs_lwt.err (fun l ->
-                l "%s Connecting to consumer '%s': %s" c.log_prefix
-                  (Address.to_string address)
-                  e)
-          in
+          Logs.err (fun l ->
+              l "%s Connecting to consumer '%s': %s" c.log_prefix
+                (Address.to_string address) e);
           let error_count = error_count + 1 in
           let stop_connecting =
             match c.mode with
@@ -943,125 +920,118 @@ module Consumer = struct
           in
           if stop_connecting then
             (* Log and stop recursing *)
-            Logs_lwt.err (fun l ->
+            Logs.err (fun l ->
                 l "%s Exceeded reconnection threshold (%d), not reconnecting"
                   c.log_prefix error_count)
           else
             let duration =
               backoff_duration ~multiplier:default_backoff ~error_count
             in
-            let* () =
-              Logs_lwt.debug (fun l ->
-                  l "%s Sleeping for %f seconds" c.log_prefix
-                    (Seconds.value duration))
-            in
-            let* () = Lwt_unix.sleep (Seconds.value duration) in
+            Logs.debug (fun l ->
+                l "%s Sleeping for %f seconds" c.log_prefix
+                  (Seconds.value duration));
+            Eio.Time.sleep c.clock (Seconds.value duration);
             loop error_count
     in
     loop 0
 
   (**
-    Start a thread to update RDY count occasionaly.
+    Start a fiber to update RDY count occasionally.
     The number of open connections can change as we add new consumers due to lookupd
     discovering producers or we have connection failures. Each time a new connection
     is opened or closed the consumer.nsqd_connections field is updated.
-    We therefore need to occasionaly update our RDY count as this may have changed so that
+    We therefore need to occasionally update our RDY count as this may have changed so that
     it is spread evenly across connections.
   *)
-  let start_ready_calculator c mbox =
+  let start_ready_calculator ~sw c mbox =
     let jitter = Random.float (recalculate_rdy_interval /. 10.0) in
     let interval = recalculate_rdy_interval +. jitter in
-    let switch = Lwt_switch.create () in
     let rec loop () =
-      if not (Lwt_switch.is_on switch) then return_unit
-      else
-        let* () = Lwt_unix.sleep interval in
-        let* () =
-          Logs_lwt.debug (fun l -> l "%s recalculating RDY" c.log_prefix)
-        in
-        let* () = Lwt_mvar.put mbox RecalcRDY in
-        loop ()
+      Eio.Time.sleep c.clock interval;
+      Logs.debug (fun l -> l "%s recalculating RDY" c.log_prefix);
+      Eio.Stream.add mbox RecalcRDY;
+      loop ()
     in
-    (* Start loop in background *)
-    async (fun () -> loop ());
-    (* Return a func to flip switch and cancel the loop *)
-    fun () -> Lwt_switch.turn_off switch
+    Fiber.fork ~sw loop
 
-  let start_nsqd_consumer c address =
-    let mbox = Lwt_mvar.create_empty () in
-    let cancel = start_ready_calculator c mbox in
-    let* () = connection_loop c address mbox in
-    (* We've given up on the connection loop, clean up *)
-    cancel ()
+  let start_nsqd_consumer ~sw c address =
+    let mbox = Eio.Stream.create 16 in
+    Switch.run (fun inner_sw ->
+        start_ready_calculator ~sw:inner_sw c mbox;
+        connection_loop c address mbox);
+    ignore sw
 
-  let start_polling_lookupd c =
+  let start_polling_lookupd ~sw c =
+    let http_client = Cohttp_eio.Client.make ~https:None c.net in
     let poll_interval =
       Float.(
         (1.0 + Random.float c.config.lookupd_poll_jitter)
         * Seconds.value c.config.lookupd_poll_interval)
     in
     let rec check_for_producers () =
-      catch
-        (fun () ->
-          let* () =
-            Logs_lwt.debug (fun l ->
-                l "Querying %d lookupd hosts" (List.length c.addresses))
-          in
-          let* results =
-            Lwt_list.map_p (query_nsqlookupd ~topic:c.topic) c.addresses
-          in
-          let discovered_producers =
-            List.filter_map ~f:Result.ok results
-            |> List.map ~f:Lookup.producer_addresses
-            |> List.join
-            |> Hash_set.of_list (module Address)
-          in
-          let running = c.open_connections in
-          let new_producers = Hash_set.diff discovered_producers running in
-          let* () =
-            Logs_lwt.debug (fun l ->
-                l "Found %d new producers" (Hash_set.length new_producers))
-          in
-          Hash_set.iter
-            ~f:(fun a ->
-              async (fun () ->
-                  let* () =
-                    Logs_lwt.debug (fun l ->
-                        l "Starting consumer for: %s" (Address.to_string a))
-                  in
-                  start_nsqd_consumer c a))
-            new_producers;
-          let* () = Lwt_unix.sleep poll_interval in
-          check_for_producers ())
-        (fun e ->
-          let* () =
-            Logs_lwt.err (fun l ->
-                l "Error polling lookupd: %s" (Exn.to_string e))
-          in
-          let* () = Lwt_unix.sleep default_backoff in
-          check_for_producers ())
+      try
+        Logs.debug (fun l ->
+            l "Querying %d lookupd hosts" (List.length c.addresses));
+        let results =
+          Fiber.List.map
+            (fun a ->
+              Switch.run (fun sw ->
+                  query_nsqlookupd ~http_client ~sw ~topic:c.topic a))
+            c.addresses
+        in
+        let discovered_producers =
+          List.filter_map ~f:Result.ok results
+          |> List.map ~f:Lookup.producer_addresses
+          |> List.join
+          |> Hash_set.of_list (module Address)
+        in
+        let running = c.open_connections in
+        let new_producers = Hash_set.diff discovered_producers running in
+        Logs.debug (fun l ->
+            l "Found %d new producers" (Hash_set.length new_producers));
+        Hash_set.iter
+          ~f:(fun a ->
+            Fiber.fork ~sw (fun () ->
+                Logs.debug (fun l ->
+                    l "Starting consumer for: %s" (Address.to_string a));
+                start_nsqd_consumer ~sw c a))
+          new_producers;
+        Eio.Time.sleep c.clock poll_interval;
+        check_for_producers ()
+      with e ->
+        Logs.err (fun l -> l "Error polling lookupd: %s" (Exn.to_string e));
+        Eio.Time.sleep c.clock (Seconds.value default_backoff);
+        check_for_producers ()
     in
     check_for_producers ()
 
   let run c =
+    Switch.run @@ fun sw ->
     match c.mode with
     | `Lookupd ->
-        let* () = Logs_lwt.debug (fun l -> l "Starting lookupd poller") in
-        start_polling_lookupd c
+        Logs.debug (fun l -> l "Starting lookupd poller");
+        start_polling_lookupd ~sw c
     | `Nsqd ->
-        let consumers =
-          List.map ~f:(fun a -> start_nsqd_consumer c a) c.addresses
-        in
-        join consumers
+        Fiber.List.iter
+          (fun a -> start_nsqd_consumer ~sw c a)
+          c.addresses
 end
 
 module Producer = struct
+  type net = [ `Generic ] Eio.Net.ty Eio.Resource.t
+  type clock = float Eio.Time.clock_ty Eio.Resource.t
+
   type connection = {
-    conn : Lwt_io.input Lwt_io.channel * Lwt_io.output Lwt_io.channel;
+    conn : conn;
     mutable last_write : float;
   }
 
-  type t = { address : Address.t; pool : connection Lwt_pool.t }
+  type t = {
+    net : net;
+    clock : clock;
+    address : Address.t;
+    pool : connection Eio.Pool.t;
+  }
 
   let default_pool_size = 5
   let default_dial_timeout = Seconds.of_float 15.0
@@ -1074,57 +1044,62 @@ module Producer = struct
   *)
   let ttl_seconds = 50.0
 
-  let create_pool address size =
+  let create_pool ~sw ~net ~clock address size =
     let validate c =
-      let now = Unix.time () in
+      let now = Eio.Time.now clock in
       let diff = now -. c.last_write in
-      return Float.(diff < ttl_seconds)
+      Float.(diff < ttl_seconds)
     in
-    (* Always return false so that we throw away connections where we encountered an error *)
-    let check _ is_ok = is_ok false in
     let dispose c =
-      let* () =
-        Logs_lwt.warn (fun l -> l "Error publishing, closing connection")
-      in
-      join [ Lwt_io.close (fst c.conn); Lwt_io.close (snd c.conn) ]
+      Logs.warn (fun l -> l "Closing pooled producer connection");
+      try Eio.Resource.close c.conn.flow with _ -> ()
     in
-    Lwt_pool.create size ~validate ~check ~dispose (fun () ->
-        let* conn = connect address default_dial_timeout in
-        let* () = send ~timeout:default_write_timeout ~conn MAGIC in
-        let last_write = Unix.time () in
-        return { conn; last_write })
+    Eio.Pool.create size ~validate ~dispose (fun () ->
+        let conn = connect ~sw ~net ~clock address default_dial_timeout in
+        send ~clock ~timeout:default_write_timeout ~conn MAGIC;
+        let last_write = Eio.Time.now clock in
+        { conn; last_write })
 
-  let create ?(pool_size = default_pool_size) address =
+  let create ~sw ~net ~clock ?(pool_size = default_pool_size) address =
     if pool_size < 1 then Error "Pool size must be >= 1"
-    else Ok { address; pool = create_pool address pool_size }
+    else
+      let net = (net :> net) in
+      let clock = (clock :> clock) in
+      Ok
+        {
+          net;
+          clock;
+          address;
+          pool = create_pool ~sw ~net ~clock address pool_size;
+        }
 
   let publish_cmd t cmd =
     let with_conn c =
       let rec read_until_ok () =
-        let* frame = read_raw_frame ~timeout:default_read_timeout c.conn in
+        let frame =
+          read_raw_frame ~clock:t.clock ~timeout:default_read_timeout c.conn
+        in
         match ServerMessage.of_raw_frame frame with
-        | Ok ResponseOk -> return_ok ()
+        | Ok ResponseOk -> Ok ()
         | Ok Heartbeat ->
-            let* () = send ~timeout:default_write_timeout ~conn:c.conn NOP in
-            c.last_write <- Unix.time ();
+            send ~clock:t.clock ~timeout:default_write_timeout ~conn:c.conn NOP;
+            c.last_write <- Eio.Time.now t.clock;
             read_until_ok ()
-        | Ok _ -> return_error "Expected OK or Heartbeat, got another message"
-        | Error e -> return_error (Printf.sprintf "Received error: %s" e)
+        | Ok _ -> Error "Expected OK or Heartbeat, got another message"
+        | Error e -> Error (Printf.sprintf "Received error: %s" e)
       in
-      let* () = send ~timeout:default_write_timeout ~conn:c.conn cmd in
-      c.last_write <- Unix.time ();
+      send ~clock:t.clock ~timeout:default_write_timeout ~conn:c.conn cmd;
+      c.last_write <- Eio.Time.now t.clock;
       read_until_ok ()
     in
-    let try_publish () = Lwt_pool.use t.pool with_conn in
-    let handle_ex e =
+    try Eio.Pool.use t.pool with_conn
+    with e ->
       let message =
         Printf.sprintf "Publishing to `%s`: %s"
           (Address.to_string t.address)
           (Exn.to_string e)
       in
-      return_error message
-    in
-    catch try_publish handle_ex
+      Error message
 
   let publish t topic message =
     let cmd = PUB (topic, message) in

@@ -1,6 +1,6 @@
 (executables
  (names integration)
- (libraries base nsq alcotest alcotest-lwt lwt))
+ (libraries base nsq alcotest eio eio_main))
 
 (rule
  (alias runtest)
