@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.4"
+
+      - name: Install dependencies
+        run: opam install . --deps-only --with-test
+
+      - name: Build
+        run: opam exec -- dune build
+
+      - name: Start NSQ
+        run: |
+          docker compose up -d
+          # Wait for nsqd (4150) and nsqlookupd (4161) to be ready
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/localhost/4150) >/dev/null 2>&1 \
+               && (echo > /dev/tcp/localhost/4161) >/dev/null 2>&1; then
+              echo "NSQ is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "NSQ did not start in time" >&2
+          docker compose logs
+          exit 1
+        shell: bash
+
+      - name: Run tests
+        run: opam exec -- dune runtest --force
+
+      - name: Stop NSQ
+        if: always()
+        run: docker compose down -v
