@@ -7,7 +7,7 @@ build: ## Build the project
 	dune build
 
 test: ## Run tests (requires NSQ running, see docker-compose.yml)
-	dune test
+	dune runtest --force
 
 fmt: ## Format source files
 	dune build @fmt --auto-promote
