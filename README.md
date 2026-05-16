@@ -1,24 +1,24 @@
 # NSQ Client Library in OCaml
 
-A simple client library for the [NSQ](http://nsq.io) message platform.
+[![CI](https://github.com/ryanslade/nsq-ocaml/actions/workflows/ci.yml/badge.svg)](https://github.com/ryanslade/nsq-ocaml/actions/workflows/ci.yml)
 
-See examples for a simple example that publishes and subscribes on the same topic.
+A simple client library for the [NSQ](http://nsq.io) message platform, built on [Eio](https://github.com/ocaml-multicore/eio).
+
+See `examples/` for a simple program that publishes and subscribes on the same topic.
 
 ## Getting started
 
-To compile the example program:
-
-_NOTE_: You will need to change the IP address to that of the docker host in example.ml
+Install dependencies and build:
 
 ```
-opam install base lwt integers cohttp-lwt-unix
+opam install . --deps-only --with-test
 make
 ```
 
-Spin up NSQD using docker:
+Spin up NSQ using docker compose:
 
 ```
-docker run nsqio/nsq nsqd
+docker compose up -d
 ```
 
 Run the example:

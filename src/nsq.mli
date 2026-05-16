@@ -38,9 +38,16 @@ end
 module Producer : sig
   type t
 
-  val create : ?pool_size:int -> Address.t -> (t, string) result
-  val publish : t -> Topic.t -> bytes -> (unit, string) result Lwt.t
-  val publish_multi : t -> Topic.t -> bytes list -> (unit, string) result Lwt.t
+  val create :
+    sw:Eio.Switch.t ->
+    net:_ Eio.Net.t ->
+    clock:_ Eio.Time.clock ->
+    ?pool_size:int ->
+    Address.t ->
+    (t, string) result
+
+  val publish : t -> Topic.t -> bytes -> (unit, string) result
+  val publish_multi : t -> Topic.t -> bytes list -> (unit, string) result
 end
 
 module Consumer : sig
@@ -73,13 +80,15 @@ module Consumer : sig
   type t
 
   val create :
+    net:_ Eio.Net.t ->
+    clock:_ Eio.Time.clock ->
     ?mode:[ `Nsqd | `Lookupd ] ->
     ?config:Config.t ->
     Address.t list ->
     Topic.t ->
     Channel.t ->
-    (bytes -> [ `Ok | `Requeue ] Lwt.t) ->
+    (bytes -> [ `Ok | `Requeue ]) ->
     t
 
-  val run : t -> unit Lwt.t
+  val run : t -> unit
 end

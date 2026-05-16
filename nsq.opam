@@ -1,6 +1,6 @@
 opam-version: "2.0"
 name: "nsq"
-version: "0.5.3"
+version: "0.6.0"
 maintainer: "Ryan Slade <ryanslade@gmail.com>"
 authors: "Ryan Slade <ryanslade@gmail.com>"
 homepage: "https://github.com/ryanslade/nsq-ocaml"
@@ -9,18 +9,19 @@ dev-repo: "git+https://github.com/ryanslade/nsq-ocaml.git"
 build: [["dune" "build" "-p" name "-j" jobs]]
 synopsis: "A client library for the NSQ messaging platform"
 depends: [
-  "ocaml" {>= "4.08.0"}
-  "dune" {>= "2.0"}
+  "ocaml" {>= "5.4.1"}
+  "dune" {>= "3.0"}
   "base"
-  "stdio"
-  "lwt" {>= "3.2.0"}
-  "integers"
+  "core"
+  "eio" {>= "1.0"}
+  "eio_main" {>= "1.0"}
   "cohttp"
-  "cohttp-lwt-unix"
+  "cohttp-eio"
   "yojson"
-  "ocaml-migrate-parsetree"
   "ppx_deriving_yojson"
   "ppx_jane"
   "logs"
+  "fmt"
   "hex"
+  "alcotest" {with-test}
 ]

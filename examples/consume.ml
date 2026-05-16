@@ -1,22 +1,22 @@
 open Base
-open Lwt
+open Eio.Std
 open Nsq
 
 let nsqd_address = "localhost"
 let log_interval = 1.0
-let start = ref (Unix.gettimeofday ())
+let start = ref 0.0
 let expected = 500000
 let consumed = ref 0
 let in_flight = 100
 
-let rate_logger () =
+let rate_logger ~clock () =
   let rec loop () =
-    Lwt_unix.sleep log_interval >>= fun () ->
+    Eio.Time.sleep clock log_interval;
     let consumed = !consumed in
-    let elapsed = Unix.gettimeofday () -. !start in
+    let elapsed = Eio.Time.now clock -. !start in
     let per_sec = Float.of_int consumed /. elapsed in
-    Logs_lwt.debug (fun l -> l "Consumed %d, %f/s" consumed per_sec)
-    >>= fun () -> if consumed >= expected then Caml.exit 0 else loop ()
+    Logs.debug (fun l -> l "Consumed %d, %f/s" consumed per_sec);
+    if consumed >= expected then Stdlib.exit 0 else loop ()
   in
   loop ()
 
@@ -27,18 +27,19 @@ let setup_logging level =
 
 let handler _ =
   Int.incr consumed;
-  return `Ok
+  `Ok
 
 let () =
   setup_logging (Some Logs.Debug);
+  Eio_main.run @@ fun env ->
+  let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
   let config =
     Consumer.Config.create ~max_in_flight:in_flight () |> Result.ok_or_failwith
   in
   let consumer =
-    Consumer.create ~mode:`Nsqd ~config [ Host nsqd_address ] (Topic "Test")
-      (Channel "benchmark") handler
+    Consumer.create ~net ~clock ~mode:`Nsqd ~config [ Host nsqd_address ]
+      (Topic "Test") (Channel "benchmark") handler
   in
-  let running = Consumer.run consumer in
-  let logger = rate_logger () in
-  start := Unix.gettimeofday ();
-  Lwt_main.run @@ join [ logger; running ]
+  start := Eio.Time.now clock;
+  Fiber.all [ rate_logger ~clock; (fun () -> Consumer.run consumer) ]

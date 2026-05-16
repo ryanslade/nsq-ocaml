@@ -1,6 +1,6 @@
 (executables
  (names example consume produce)
- (libraries nsq logs logs.fmt fmt.tty))
+ (libraries nsq eio eio_main logs logs.fmt fmt.tty))
 
 (install
  (section bin)
