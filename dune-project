@@ -21,7 +21,6 @@
  (depends
   (ocaml (>= 5.4.1))
   (dune (>= 3.0))
-  base
   core
   (eio (>= 1.0))
   (eio_main (>= 1.0))

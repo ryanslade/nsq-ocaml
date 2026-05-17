@@ -129,10 +129,7 @@ type command =
   | RDY of int
   | NOP
 
-let try_with_string f =
-  match Result.try_with f with
-  | Ok _ as x -> x
-  | Error e -> Error (Exn.to_string e)
+let try_with_string f = Result.try_with f |> Result.map_error ~f:Exn.to_string
 
 module ServerMessage = struct
   type t =
@@ -353,7 +350,7 @@ let query_nsqlookupd ~http_client ~sw ~topic a =
     match Http.Response.status resp with
     | `OK ->
         let body_str =
-          Eio.Buf_read.(parse_exn take_all) body ~max_size:Int.max_value
+          Eio.Buf_read.(parse_exn take_all) body ~max_size:(1 * 1024 * 1024)
         in
         log_and_return "Error parsing lookup response"
           (Lookup.response_of_string body_str)

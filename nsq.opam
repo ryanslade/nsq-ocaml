@@ -10,7 +10,6 @@ bug-reports: "https://github.com/ryanslade/nsq-ocaml/issues"
 depends: [
   "ocaml" {>= "5.4.1"}
   "dune" {>= "3.0"}
-  "base"
   "core"
   "eio" {>= "1.0"}
   "eio_main" {>= "1.0"}
