@@ -1,7 +1,7 @@
 open Base
 open Eio.Std
 
-let client_version = "0.5.3"
+let client_version = "0.6.0"
 let default_nsqd_port = 4150
 let default_lookupd_port = 4161
 let network_buffer_size = 16 * 1024
