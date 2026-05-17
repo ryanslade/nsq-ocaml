@@ -366,34 +366,29 @@ let query_nsqlookupd ~http_client ~sw ~topic a =
     let s = Exn.to_string e in
     log_and_return "Querying lookupd" (Error s)
 
-(* Buffer shared between functions that produce packets *)
-let shared_buffer = Buffer.create 1000000
-
 (*
      PUB <topic_name>\n
      [ 4-byte size in bytes ][ N-byte binary data ]
 
      <topic_name> - a valid string (optionally having #ephemeral suffix)
 *)
-let bytes_of_pub =
-  (* Preallocate buffers that we can reuse between runs *)
+let bytes_of_pub topic data =
+  let topic = Topic.to_string topic in
+  let buf = Buffer.create (4 + String.length topic + 1 + 4 + Bytes.length data) in
   let len_buf = Bytes.create 4 in
-  let prefix = "PUB " in
-  fun topic data ->
-    Stdlib.Bytes.set_int32_be len_buf 0 (Int32.of_int_exn (Bytes.length data));
-    Buffer.reset shared_buffer;
-    Buffer.add_string shared_buffer prefix;
-    Buffer.add_string shared_buffer (Topic.to_string topic);
-    Buffer.add_string shared_buffer "\n";
-    Buffer.add_bytes shared_buffer len_buf;
-    Buffer.add_bytes shared_buffer data;
-    Buffer.contents_bytes shared_buffer
+  Stdlib.Bytes.set_int32_be len_buf 0 (Int32.of_int_exn (Bytes.length data));
+  Buffer.add_string buf "PUB ";
+  Buffer.add_string buf topic;
+  Buffer.add_string buf "\n";
+  Buffer.add_bytes buf len_buf;
+  Buffer.add_bytes buf data;
+  Buffer.contents_bytes buf
 
 let%expect_test "bytes_of_pub" =
   let topic = Topic.Topic "TestTopic" in
   let data = Bytes.of_string "Hello World" in
   bytes_of_pub topic data |> Hex.of_bytes |> Hex.hexdump ~print_chars:false;
-  (* Run it twice to ensure our shared buffers don't break anything *)
+  (* Run it twice with different inputs to ensure independence between calls *)
   let topic = Topic.Topic "AnotherTopic" in
   let data = Bytes.of_string "Another message" in
   bytes_of_pub topic data |> Hex.of_bytes |> Hex.hexdump ~print_chars:false;
@@ -415,30 +410,32 @@ let%expect_test "bytes_of_pub" =
 
     <topic_name> - a valid string (optionally having #ephemeral suffix)
 *)
-let bytes_of_mpub =
+let bytes_of_mpub topic bodies =
+  let topic = Topic.to_string topic in
+  let body_size =
+    List.fold_left ~f:(fun a b -> a + Bytes.length b) ~init:0 bodies
+  in
+  let num_messages = List.length bodies in
+  let buf =
+    Buffer.create
+      (5 + String.length topic + 1 + 8 + (4 * num_messages) + body_size)
+  in
   let header = Bytes.create 8 in
   let size_buf = Bytes.create 4 in
-  let prefix = "MPUB " in
-  fun topic bodies ->
-    let body_size =
-      List.fold_left ~f:(fun a b -> a + Bytes.length b) ~init:0 bodies
-    in
-    let num_messages = List.length bodies in
-    Buffer.reset shared_buffer;
-    Buffer.add_string shared_buffer prefix;
-    Buffer.add_string shared_buffer (Topic.to_string topic);
-    Buffer.add_string shared_buffer "\n";
-    Stdlib.Bytes.set_int32_be header 0 (Int32.of_int_exn body_size);
-    Stdlib.Bytes.set_int32_be header 4 (Int32.of_int_exn num_messages);
-    Buffer.add_bytes shared_buffer header;
-    List.iter
-      ~f:(fun data ->
-        Stdlib.Bytes.set_int32_be size_buf 0
-          (Int32.of_int_exn (Bytes.length data));
-        Buffer.add_bytes shared_buffer size_buf;
-        Buffer.add_bytes shared_buffer data)
-      bodies;
-    Buffer.contents_bytes shared_buffer
+  Buffer.add_string buf "MPUB ";
+  Buffer.add_string buf topic;
+  Buffer.add_string buf "\n";
+  Stdlib.Bytes.set_int32_be header 0 (Int32.of_int_exn body_size);
+  Stdlib.Bytes.set_int32_be header 4 (Int32.of_int_exn num_messages);
+  Buffer.add_bytes buf header;
+  List.iter
+    ~f:(fun data ->
+      Stdlib.Bytes.set_int32_be size_buf 0
+        (Int32.of_int_exn (Bytes.length data));
+      Buffer.add_bytes buf size_buf;
+      Buffer.add_bytes buf data)
+    bodies;
+  Buffer.contents_bytes buf
 
 let%expect_test "bytes_of_mpub" =
   let topic = Topic.Topic "TestTopic" in
@@ -459,16 +456,15 @@ let%expect_test "bytes_of_mpub" =
    [ 4-byte size in bytes ][ N-byte JSON data ]
 *)
 let bytes_of_identify c =
-  let prefix = "IDENTIFY\n" in
-  let buf = Bytes.create 4 in
   let data = IdentifyConfig.to_yojson c |> Yojson.Safe.to_string in
   let length = String.length data in
-  Stdlib.Bytes.set_int32_be buf 0 (Int32.of_int_exn length);
-  Buffer.reset shared_buffer;
-  Buffer.add_string shared_buffer prefix;
-  Buffer.add_bytes shared_buffer buf;
-  Buffer.add_string shared_buffer data;
-  Buffer.contents_bytes shared_buffer
+  let len_buf = Bytes.create 4 in
+  Stdlib.Bytes.set_int32_be len_buf 0 (Int32.of_int_exn length);
+  let buf = Buffer.create (9 + 4 + length) in
+  Buffer.add_string buf "IDENTIFY\n";
+  Buffer.add_bytes buf len_buf;
+  Buffer.add_string buf data;
+  Buffer.contents_bytes buf
 
 let%expect_test "bytes_of_identify" =
   let open IdentifyConfig in
@@ -588,7 +584,7 @@ let send ~clock ~timeout ~conn command =
 
 let catch_result f = try Ok (f ()) with e -> Error (Exn.to_string e)
 
-let connect ~sw ~net ~clock host timeout =
+let connect ~sw ~net ~clock ~rng host timeout =
   let host, port =
     match host with
     | Address.Host h -> (h, default_nsqd_port)
@@ -600,7 +596,7 @@ let connect ~sw ~net ~clock host timeout =
   let addr =
     match addrs with
     | [] -> failwith (Printf.sprintf "No addresses for %s" host)
-    | xs -> List.random_element_exn xs
+    | xs -> List.random_element_exn ~random_state:rng xs
   in
   maybe_timeout ~clock ~timeout (fun () ->
       let flow = Eio.Net.connect ~sw net addr in
@@ -796,6 +792,7 @@ module Consumer = struct
     config : Config.t;
     mode : [ `Nsqd | `Lookupd ];
     log_prefix : string;
+    rng : Random.State.t;
   }
 
   type breaker_position = Closed | HalfOpen | Open
@@ -836,6 +833,7 @@ module Consumer = struct
       log_prefix =
         Printf.sprintf "%s/%s" (Topic.to_string topic)
           (Channel.to_string channel);
+      rng = Random.State.make_self_init ();
     }
 
   let calc_rdy ~connection_count ~max_in_flight =
@@ -1148,7 +1146,8 @@ module Consumer = struct
       Switch.run @@ fun sw ->
       let conn =
         catch_result (fun () ->
-            connect ~sw ~net:c.net ~clock:c.clock address c.config.dial_timeout)
+            connect ~sw ~net:c.net ~clock:c.clock ~rng:c.rng address
+              c.config.dial_timeout)
       in
       match conn with
       | Ok conn ->
@@ -1203,7 +1202,7 @@ module Consumer = struct
       therefore need to occasionally update our RDY count as this may have
       changed so that it is spread evenly across connections. *)
   let start_ready_calculator ~sw c mbox =
-    let jitter = Random.float (recalculate_rdy_interval /. 10.0) in
+    let jitter = Random.State.float c.rng (recalculate_rdy_interval /. 10.0) in
     let interval = recalculate_rdy_interval +. jitter in
     let rec loop () =
       Eio.Time.sleep c.clock interval;
@@ -1224,7 +1223,7 @@ module Consumer = struct
     let http_client = Cohttp_eio.Client.make ~https:None c.net in
     let poll_interval =
       Float.(
-        (1.0 + Random.float c.config.lookupd_poll_jitter)
+        (1.0 + Random.State.float c.rng c.config.lookupd_poll_jitter)
         * Seconds.value c.config.lookupd_poll_interval)
     in
     let rec check_for_producers () =
@@ -1284,6 +1283,7 @@ module Producer = struct
     clock : clock;
     address : Address.t;
     pool : connection Eio.Pool.t;
+    rng : Random.State.t;
   }
 
   let default_pool_size = 5
@@ -1296,7 +1296,7 @@ module Producer = struct
       the connection. *)
   let ttl_seconds = 50.0
 
-  let create_pool ~sw ~net ~clock address size =
+  let create_pool ~sw ~net ~clock ~rng address size =
     let validate c =
       let now = Eio.Time.now clock in
       let diff = now -. c.last_write in
@@ -1307,7 +1307,7 @@ module Producer = struct
       try Eio.Resource.close c.conn.flow with _ -> ()
     in
     Eio.Pool.create size ~validate ~dispose (fun () ->
-        let conn = connect ~sw ~net ~clock address default_dial_timeout in
+        let conn = connect ~sw ~net ~clock ~rng address default_dial_timeout in
         send ~clock ~timeout:default_write_timeout ~conn MAGIC;
         let last_write = Eio.Time.now clock in
         { conn; last_write })
@@ -1317,12 +1317,14 @@ module Producer = struct
     else
       let net = (net :> net) in
       let clock = (clock :> clock) in
+      let rng = Random.State.make_self_init () in
       Ok
         {
           net;
           clock;
           address;
-          pool = create_pool ~sw ~net ~clock address pool_size;
+          pool = create_pool ~sw ~net ~clock ~rng address pool_size;
+          rng;
         }
 
   let publish_cmd t cmd =
