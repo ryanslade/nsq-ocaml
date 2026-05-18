@@ -5,6 +5,10 @@ let client_version = "0.6.0"
 let default_nsqd_port = 4150
 let default_lookupd_port = 4161
 let network_buffer_size = 16 * 1024
+
+(* Hard cap on a single frame size, used to bound buffered reads. NSQ's default
+   max-msg-size is 1 MiB; we leave generous headroom for operators that raise it. *)
+let max_frame_size = 16 * 1024 * 1024
 let lookupd_error_threshold = 5
 
 module Seconds = struct
@@ -29,10 +33,10 @@ end
 let default_requeue_delay = Milliseconds.of_int64 5000L
 
 module MessageID = struct
-  type t = MessageID of bytes
+  type t = MessageID of string
 
-  let of_bytes b = MessageID b
-  let to_string = function MessageID id -> Bytes.to_string id
+  let of_string s = MessageID s
+  let to_string = function MessageID id -> id
 end
 
 let ephemeral s = s ^ "#ephemeral"
@@ -75,7 +79,7 @@ module FrameType = struct
     | i -> FrameUnknown i
 end
 
-type raw_frame = { frame_type : int32; data : Bytes.t }
+type raw_frame = { frame_type : int32; data : string }
 
 type raw_message = {
   timestamp : int64;
@@ -156,19 +160,19 @@ module ServerMessage = struct
         Printf.sprintf "Message with ID %s" (MessageID.to_string m.id)
 
   let parse_response_body body =
-    let body = Bytes.to_string body in
     match body with
     | "OK" -> Ok ResponseOk
     | "_heartbeat_" -> Ok Heartbeat
     | _ -> Error (Printf.sprintf "Unknown response: %s" body)
 
   let parse_message_body_exn body =
-    let open Stdlib in
-    let timestamp = Bytes.get_int64_be body 0 in
-    let attempts = Bytes.get_uint16_be body 8 in
-    let length = Bytes.length body in
-    let id = MessageID.of_bytes (Bytes.sub body 10 16) in
-    let body = Bytes.sub body 26 (length - 26) in
+    let timestamp = Stdlib.String.get_int64_be body 0 in
+    let attempts = Stdlib.String.get_uint16_be body 8 in
+    let length = String.length body in
+    let id = MessageID.of_string (String.sub body ~pos:10 ~len:16) in
+    let body =
+      Stdlib.Bytes.unsafe_of_string (String.sub body ~pos:26 ~len:(length - 26))
+    in
     Message { timestamp; attempts; id; body }
 
   let parse_message_body body =
@@ -176,7 +180,7 @@ module ServerMessage = struct
 
   let parse_error_body body =
     let open Result in
-    match String.split ~on:' ' (Bytes.to_string body) with
+    match String.split ~on:' ' body with
     | [ code; detail ] -> (
         match code with
         | "E_INVALID" -> return (ErrorInvalid detail)
@@ -187,7 +191,7 @@ module ServerMessage = struct
         | "E_TOUCH_FAILED" -> return (ErrorTOUCHFailed detail)
         | _ -> fail (Printf.sprintf "Unknown error code: %s. %s" code detail))
     | _ ->
-        fail (Printf.sprintf "Malformed error code: %s" (Bytes.to_string body))
+        fail (Printf.sprintf "Malformed error code: %s" body)
 
   let of_raw_frame raw =
     match FrameType.of_int32 raw.frame_type with
@@ -200,7 +204,7 @@ module ServerMessage = struct
   let%expect_test "parse_response_body" =
     let cases = [ "OK"; "_heartbeat_"; "wat" ] in
     List.iter cases ~f:(fun s ->
-        let r = parse_response_body (Bytes.of_string s) in
+        let r = parse_response_body s in
         let str = match r with Ok m -> to_string m | Error e -> "ERR: " ^ e in
         Stdlib.print_endline (Printf.sprintf "%s -> %s" s str));
     [%expect
@@ -224,7 +228,7 @@ module ServerMessage = struct
       ]
     in
     List.iter cases ~f:(fun s ->
-        let r = parse_error_body (Bytes.of_string s) in
+        let r = parse_error_body s in
         let str = match r with Ok m -> to_string m | Error e -> "ERR: " ^ e in
         Stdlib.print_endline (Printf.sprintf "%s -> %s" s str));
     [%expect
@@ -240,11 +244,11 @@ module ServerMessage = struct
       |}]
 
   let%expect_test "parse_message_body round-trip" =
-    let body = Bytes.create 26 in
-    Stdlib.Bytes.set_int64_be body 0 1234567890L;
-    Stdlib.Bytes.set_uint16_be body 8 7;
-    Stdlib.Bytes.blit_string "0123456789abcdef" 0 body 10 16;
-    let body = Stdlib.Bytes.cat body (Bytes.of_string "hello") in
+    let header = Bytes.create 26 in
+    Stdlib.Bytes.set_int64_be header 0 1234567890L;
+    Stdlib.Bytes.set_uint16_be header 8 7;
+    Stdlib.Bytes.blit_string "0123456789abcdef" 0 header 10 16;
+    let body = Bytes.to_string header ^ "hello" in
     let r = parse_message_body body in
     (match r with
     | Ok (Message m) ->
@@ -258,9 +262,9 @@ module ServerMessage = struct
   let%expect_test "of_raw_frame" =
     let frames =
       [
-        { frame_type = 0l; data = Bytes.of_string "OK" };
-        { frame_type = 1l; data = Bytes.of_string "E_INVALID nope" };
-        { frame_type = 99l; data = Bytes.create 0 };
+        { frame_type = 0l; data = "OK" };
+        { frame_type = 1l; data = "E_INVALID nope" };
+        { frame_type = 99l; data = "" };
       ]
     in
     List.iter frames ~f:(fun f ->
@@ -369,26 +373,26 @@ let query_nsqlookupd ~http_client ~sw ~topic a =
 
      <topic_name> - a valid string (optionally having #ephemeral suffix)
 *)
-let bytes_of_pub topic data =
+let string_of_pub topic data =
   let topic = Topic.to_string topic in
   let buf = Buffer.create (4 + String.length topic + 1 + 4 + Bytes.length data) in
   let len_buf = Bytes.create 4 in
   Stdlib.Bytes.set_int32_be len_buf 0 (Int32.of_int_exn (Bytes.length data));
   Buffer.add_string buf "PUB ";
   Buffer.add_string buf topic;
-  Buffer.add_string buf "\n";
+  Buffer.add_char buf '\n';
   Buffer.add_bytes buf len_buf;
   Buffer.add_bytes buf data;
-  Buffer.contents_bytes buf
+  Buffer.contents buf
 
-let%expect_test "bytes_of_pub" =
+let%expect_test "string_of_pub" =
   let topic = Topic.Topic "TestTopic" in
   let data = Bytes.of_string "Hello World" in
-  bytes_of_pub topic data |> Hex.of_bytes |> Hex.hexdump ~print_chars:false;
+  string_of_pub topic data |> Hex.of_string |> Hex.hexdump ~print_chars:false;
   (* Run it twice with different inputs to ensure independence between calls *)
   let topic = Topic.Topic "AnotherTopic" in
   let data = Bytes.of_string "Another message" in
-  bytes_of_pub topic data |> Hex.of_bytes |> Hex.hexdump ~print_chars:false;
+  string_of_pub topic data |> Hex.of_string |> Hex.hexdump ~print_chars:false;
   [%expect
     {|
         00000000: 5055 4220 5465 7374 546f 7069 630a 0000
@@ -407,7 +411,7 @@ let%expect_test "bytes_of_pub" =
 
     <topic_name> - a valid string (optionally having #ephemeral suffix)
 *)
-let bytes_of_mpub topic bodies =
+let string_of_mpub topic bodies =
   let topic = Topic.to_string topic in
   let body_size =
     List.fold_left ~f:(fun a b -> a + Bytes.length b) ~init:0 bodies
@@ -421,7 +425,7 @@ let bytes_of_mpub topic bodies =
   let size_buf = Bytes.create 4 in
   Buffer.add_string buf "MPUB ";
   Buffer.add_string buf topic;
-  Buffer.add_string buf "\n";
+  Buffer.add_char buf '\n';
   Stdlib.Bytes.set_int32_be header 0 (Int32.of_int_exn body_size);
   Stdlib.Bytes.set_int32_be header 4 (Int32.of_int_exn num_messages);
   Buffer.add_bytes buf header;
@@ -432,14 +436,14 @@ let bytes_of_mpub topic bodies =
       Buffer.add_bytes buf size_buf;
       Buffer.add_bytes buf data)
     bodies;
-  Buffer.contents_bytes buf
+  Buffer.contents buf
 
-let%expect_test "bytes_of_mpub" =
+let%expect_test "string_of_mpub" =
   let topic = Topic.Topic "TestTopic" in
   let bodies =
     [ Bytes.of_string "Hello world"; Bytes.of_string "Hello again" ]
   in
-  bytes_of_mpub topic bodies |> Hex.of_bytes |> Hex.hexdump ~print_chars:false;
+  string_of_mpub topic bodies |> Hex.of_string |> Hex.hexdump ~print_chars:false;
   [%expect
     {|
         00000000: 4d50 5542 2054 6573 7454 6f70 6963 0a00
@@ -452,7 +456,7 @@ let%expect_test "bytes_of_mpub" =
    IDENTIFY\n
    [ 4-byte size in bytes ][ N-byte JSON data ]
 *)
-let bytes_of_identify c =
+let string_of_identify c =
   let data = IdentifyConfig.to_yojson c |> Yojson.Safe.to_string in
   let length = String.length data in
   let len_buf = Bytes.create 4 in
@@ -461,9 +465,9 @@ let bytes_of_identify c =
   Buffer.add_string buf "IDENTIFY\n";
   Buffer.add_bytes buf len_buf;
   Buffer.add_string buf data;
-  Buffer.contents_bytes buf
+  Buffer.contents buf
 
-let%expect_test "bytes_of_identify" =
+let%expect_test "string_of_identify" =
   let open IdentifyConfig in
   let id =
     {
@@ -476,7 +480,7 @@ let%expect_test "bytes_of_identify" =
       sample_rate = 50;
     }
   in
-  bytes_of_identify id |> Hex.of_bytes |> Hex.hexdump ~print_chars:false;
+  string_of_identify id |> Hex.of_string |> Hex.hexdump ~print_chars:false;
   [%expect
     {|
         00000000: 4944 454e 5449 4659 0a00 0000 977b 2268
@@ -492,24 +496,24 @@ let%expect_test "bytes_of_identify" =
         00000010: 3a35 307d
       |}]
 
-let bytes_of_command = function
-  | MAGIC -> Bytes.of_string "  V2"
-  | IDENTIFY c -> bytes_of_identify c
-  | NOP -> Bytes.of_string "NOP\n"
-  | RDY i -> Printf.sprintf "RDY %i\n" i |> Bytes.of_string
-  | FIN id ->
-      Printf.sprintf "FIN %s\n" (MessageID.to_string id) |> Bytes.of_string
+let magic_bytes = "  V2"
+let nop_bytes = "NOP\n"
+
+let string_of_command = function
+  | MAGIC -> magic_bytes
+  | IDENTIFY c -> string_of_identify c
+  | NOP -> nop_bytes
+  | RDY i -> Printf.sprintf "RDY %i\n" i
+  | FIN id -> Printf.sprintf "FIN %s\n" (MessageID.to_string id)
   | SUB (t, c) ->
       Printf.sprintf "SUB %s %s\n" (Topic.to_string t) (Channel.to_string c)
-      |> Bytes.of_string
   | REQ (id, delay) ->
       Printf.sprintf "REQ %s %Li\n" (MessageID.to_string id)
         (Milliseconds.value delay)
-      |> Bytes.of_string
-  | PUB (t, data) -> bytes_of_pub t data
-  | MPUB (t, data) -> bytes_of_mpub t data
+  | PUB (t, data) -> string_of_pub t data
+  | MPUB (t, data) -> string_of_mpub t data
 
-let%expect_test "bytes_of_command" =
+let%expect_test "string_of_command" =
   let commands =
     [
       MAGIC;
@@ -526,15 +530,15 @@ let%expect_test "bytes_of_command" =
       NOP;
       RDY 10;
       SUB (Topic "Test", Channel "Test");
-      REQ (MessageID.of_bytes (Bytes.of_string "ABC"), 100L);
-      FIN (MessageID.of_bytes (Bytes.of_string "ABC"));
+      REQ (MessageID.of_string "ABC", 100L);
+      FIN (MessageID.of_string "ABC");
       PUB (Topic "Test", Bytes.of_string "Hello");
       MPUB (Topic "Test", [ Bytes.of_string "A"; Bytes.of_string "BB" ]);
     ]
   in
   List.iter
     ~f:(fun c ->
-      bytes_of_command c |> Hex.of_bytes |> Hex.hexdump ~print_chars:false)
+      string_of_command c |> Hex.of_string |> Hex.hexdump ~print_chars:false)
     commands;
   [%expect
     {|
@@ -575,11 +579,9 @@ let maybe_timeout ~clock ~timeout f =
   else Eio.Time.with_timeout_exn clock timeout f
 
 let send ~clock ~timeout ~conn command =
-  let data = bytes_of_command command in
+  let data = string_of_command command in
   maybe_timeout ~clock ~timeout (fun () ->
-      Eio.Flow.copy_string (Bytes.to_string data) conn.flow)
-
-let catch_result f = try Ok (f ()) with e -> Error (Exn.to_string e)
+      Eio.Flow.copy_string data conn.flow)
 
 let connect ~sw ~net ~clock ~rng host timeout =
   let host, port =
@@ -599,23 +601,16 @@ let connect ~sw ~net ~clock ~rng host timeout =
       let flow = Eio.Net.connect ~sw net addr in
       let reader =
         Eio.Buf_read.of_flow ~initial_size:network_buffer_size
-          ~max_size:Int.max_value flow
+          ~max_size:max_frame_size flow
       in
       { flow; reader })
 
-let frame_from_bytes bytes =
-  let frame_type = Stdlib.Bytes.get_int32_be bytes 0 in
-  let to_read = Bytes.length bytes - 4 in
-  let data = Bytes.sub ~pos:4 ~len:to_read bytes in
-  { frame_type; data }
-
 let read_raw_frame ~clock ~timeout conn =
   let size = Eio.Buf_read.BE.uint32 conn.reader |> Int32.to_int_exn in
-  let bytes = Bytes.create size in
   maybe_timeout ~clock ~timeout (fun () ->
-      let s = Eio.Buf_read.take size conn.reader in
-      Stdlib.Bytes.blit_string s 0 bytes 0 size);
-  frame_from_bytes bytes
+      let frame_type = Eio.Buf_read.BE.uint32 conn.reader in
+      let data = Eio.Buf_read.take (size - 4) conn.reader in
+      { frame_type; data })
 
 let send_expect_ok ~clock ~read_timeout ~write_timeout ~conn cmd =
   send ~clock ~timeout:write_timeout ~conn cmd;
@@ -876,7 +871,7 @@ module Consumer = struct
       Milliseconds.of_int64 Int64.(d * attempts)
     in
     let handler_result =
-      match catch_result (fun () -> handler msg.body) with
+      match try_with_string (fun () -> handler msg.body) with
       | Ok r -> r
       | Error s ->
           Logs.err (fun l -> l "Handler error: %s" s);
@@ -901,7 +896,7 @@ module Consumer = struct
       {
         timestamp = 0L;
         attempts;
-        id = MessageID.of_bytes (Bytes.of_string "0123456789abcdef");
+        id = MessageID.of_string "0123456789abcdef";
         body = Bytes.of_string "data";
       }
     in
@@ -964,7 +959,7 @@ module Consumer = struct
 
   let read_loop ~clock ~timeout conn mbox =
     let rec loop () =
-      match catch_result (fun () -> read_raw_frame ~clock ~timeout conn) with
+      match try_with_string (fun () -> read_raw_frame ~clock ~timeout conn) with
       | Ok raw ->
           Eio.Stream.add mbox (RawFrame raw);
           loop ()
@@ -1008,7 +1003,7 @@ module Consumer = struct
       next_breaker_state ~error_threshold:3 ~backoff_multiplier:1.0
         ~rdy_when_closed:5
     in
-    let dummy_id = MessageID.of_bytes (Bytes.of_string "0123456789abcdef") in
+    let dummy_id = MessageID.of_string "0123456789abcdef" in
     let req = REQ (dummy_id, 0L) in
     let fin = FIN dummy_id in
     let show_pos = function
@@ -1142,7 +1137,7 @@ module Consumer = struct
     let rec loop error_count =
       Switch.run @@ fun sw ->
       let conn =
-        catch_result (fun () ->
+        try_with_string (fun () ->
             connect ~sw ~net:c.net ~clock:c.clock ~rng:c.rng address
               c.config.dial_timeout)
       in
