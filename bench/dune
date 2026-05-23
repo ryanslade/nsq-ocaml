@@ -1,0 +1,3 @@
+(executables
+ (names publish_throughput)
+ (libraries base nsq eio eio_main unix))
