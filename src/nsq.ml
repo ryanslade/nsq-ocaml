@@ -376,12 +376,10 @@ let query_nsqlookupd ~http_client ~sw ~topic a =
 let string_of_pub topic data =
   let topic = Topic.to_string topic in
   let buf = Buffer.create (4 + String.length topic + 1 + 4 + Bytes.length data) in
-  let len_buf = Bytes.create 4 in
-  Stdlib.Bytes.set_int32_be len_buf 0 (Int32.of_int_exn (Bytes.length data));
   Buffer.add_string buf "PUB ";
   Buffer.add_string buf topic;
   Buffer.add_char buf '\n';
-  Buffer.add_bytes buf len_buf;
+  Stdlib.Buffer.add_int32_be buf (Int32.of_int_exn (Bytes.length data));
   Buffer.add_bytes buf data;
   Buffer.contents buf
 
@@ -421,19 +419,14 @@ let string_of_mpub topic bodies =
     Buffer.create
       (5 + String.length topic + 1 + 8 + (4 * num_messages) + body_size)
   in
-  let header = Bytes.create 8 in
-  let size_buf = Bytes.create 4 in
   Buffer.add_string buf "MPUB ";
   Buffer.add_string buf topic;
   Buffer.add_char buf '\n';
-  Stdlib.Bytes.set_int32_be header 0 (Int32.of_int_exn body_size);
-  Stdlib.Bytes.set_int32_be header 4 (Int32.of_int_exn num_messages);
-  Buffer.add_bytes buf header;
+  Stdlib.Buffer.add_int32_be buf (Int32.of_int_exn body_size);
+  Stdlib.Buffer.add_int32_be buf (Int32.of_int_exn num_messages);
   List.iter
     ~f:(fun data ->
-      Stdlib.Bytes.set_int32_be size_buf 0
-        (Int32.of_int_exn (Bytes.length data));
-      Buffer.add_bytes buf size_buf;
+      Stdlib.Buffer.add_int32_be buf (Int32.of_int_exn (Bytes.length data));
       Buffer.add_bytes buf data)
     bodies;
   Buffer.contents buf
@@ -459,11 +452,9 @@ let%expect_test "string_of_mpub" =
 let string_of_identify c =
   let data = IdentifyConfig.to_yojson c |> Yojson.Safe.to_string in
   let length = String.length data in
-  let len_buf = Bytes.create 4 in
-  Stdlib.Bytes.set_int32_be len_buf 0 (Int32.of_int_exn length);
   let buf = Buffer.create (9 + 4 + length) in
   Buffer.add_string buf "IDENTIFY\n";
-  Buffer.add_bytes buf len_buf;
+  Stdlib.Buffer.add_int32_be buf (Int32.of_int_exn length);
   Buffer.add_string buf data;
   Buffer.contents buf
 
