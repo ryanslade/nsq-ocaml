@@ -37,8 +37,7 @@ let parse_args () =
       ("-pool", Stdlib.Arg.Set_int pool_size, " producer pool size");
     ]
   in
-  Stdlib.Arg.parse
-    (Stdlib.Arg.align specs)
+  Stdlib.Arg.parse (Stdlib.Arg.align specs)
     (fun _ -> ())
     "publish_throughput [options]";
   {
@@ -65,8 +64,7 @@ let publish_one ~p ~topic ~payload ~batch ~batch_size =
 
 let run args =
   if args.batch_size < 1 then failwith "-batch must be >= 1";
-  if args.count < args.batch_size then
-    failwith "-n must be >= -batch";
+  if args.count < args.batch_size then failwith "-n must be >= -batch";
   Eio_main.run @@ fun env ->
   let net = Eio.Stdenv.net env in
   let clock = Eio.Stdenv.clock env in
@@ -80,7 +78,9 @@ let run args =
   let payload = Bytes.make args.payload_size 'x' in
   let batch = List.init args.batch_size (fun _ -> payload) in
   let batches = args.count / args.batch_size in
-  let publish_one () = publish_one ~p ~topic ~payload ~batch ~batch_size:args.batch_size in
+  let publish_one () =
+    publish_one ~p ~topic ~payload ~batch ~batch_size:args.batch_size
+  in
 
   (* Warm-up: one publish to populate the connection. Not counted. *)
   publish_one ();
@@ -116,7 +116,8 @@ let run args =
   Stdlib.Printf.printf "  host:            %s\n" args.host;
   Stdlib.Printf.printf "  topic:           %s\n" args.topic;
   Stdlib.Printf.printf "  total messages:  %d\n" total_msgs;
-  Stdlib.Printf.printf "  batch size:      %d (%d calls)\n" args.batch_size batches;
+  Stdlib.Printf.printf "  batch size:      %d (%d calls)\n" args.batch_size
+    batches;
   Stdlib.Printf.printf "  payload size:    %d B\n" args.payload_size;
   Stdlib.Printf.printf "  pool size:       %d\n" args.pool_size;
   Stdlib.print_endline "";
@@ -127,8 +128,8 @@ let run args =
   Stdlib.Printf.printf "  throughput:      %.0f msgs/s   %s/s\n" msgs_per_sec
     (pp_bytes bytes_per_sec);
   Stdlib.print_endline "";
-  Stdlib.Printf.printf "  allocated:       %s total, %.1f B/msg\n" (pp_bytes allocated)
-    (per_msg allocated);
+  Stdlib.Printf.printf "  allocated:       %s total, %.1f B/msg\n"
+    (pp_bytes allocated) (per_msg allocated);
   Stdlib.Printf.printf "  minor words:     %.3e total, %.1f /msg\n" minor
     (per_msg minor);
   Stdlib.Printf.printf "  promoted words:  %.3e total, %.1f /msg\n" promoted
@@ -139,6 +140,7 @@ let run args =
     (gc1.minor_collections - gc0.minor_collections);
   Stdlib.Printf.printf "  major GCs:       %d\n"
     (gc1.major_collections - gc0.major_collections);
-  Stdlib.Printf.printf "  compactions:     %d\n" (gc1.compactions - gc0.compactions)
+  Stdlib.Printf.printf "  compactions:     %d\n"
+    (gc1.compactions - gc0.compactions)
 
 let () = run (parse_args ())

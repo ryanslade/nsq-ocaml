@@ -4,7 +4,6 @@ let try_with_string f =
   match f () with v -> Ok v | exception e -> Error (Printexc.to_string e)
 
 let ok_or_failwith = function Ok v -> v | Error e -> failwith e
-
 let client_version = "0.6.0"
 let default_nsqd_port = 4150
 let default_lookupd_port = 4161
@@ -383,7 +382,9 @@ let query_nsqlookupd ~http_client ~sw ~topic a =
 *)
 let string_of_pub topic data =
   let topic = Topic.to_string topic in
-  let buf = Buffer.create (4 + String.length topic + 1 + 4 + Bytes.length data) in
+  let buf =
+    Buffer.create (4 + String.length topic + 1 + 4 + Bytes.length data)
+  in
   Buffer.add_string buf "PUB ";
   Buffer.add_string buf topic;
   Buffer.add_char buf '\n';
@@ -419,9 +420,7 @@ let%expect_test "string_of_pub" =
 *)
 let string_of_mpub topic bodies =
   let topic = Topic.to_string topic in
-  let body_size =
-    List.fold_left (fun a b -> a + Bytes.length b) 0 bodies
-  in
+  let body_size = List.fold_left (fun a b -> a + Bytes.length b) 0 bodies in
   let num_messages = List.length bodies in
   let buf =
     Buffer.create
@@ -578,8 +577,7 @@ let maybe_timeout ~clock ~timeout f =
 
 let send ~clock ~timeout ~conn command =
   let data = string_of_command command in
-  maybe_timeout ~clock ~timeout (fun () ->
-      Eio.Flow.copy_string data conn.flow)
+  maybe_timeout ~clock ~timeout (fun () -> Eio.Flow.copy_string data conn.flow)
 
 let connect ~sw ~net ~clock ~rng host timeout =
   let host, port =
@@ -670,20 +668,22 @@ module Consumer = struct
         if v <= 0 then err (Printf.sprintf "%s = %d must be positive" name v)
       in
       let positive_float name v =
-        if v <= 0.0 then
-          err (Printf.sprintf "%s = %f must be positive" name v)
+        if v <= 0.0 then err (Printf.sprintf "%s = %f must be positive" name v)
       in
       let non_blank name v =
         if v = "" then err (Printf.sprintf "%s must not be blank" name)
       in
       positive_int "max_in_flight" t.max_in_flight;
       bound_int "max_attempts" t.max_attempts ~min:0 ~max:65535;
-      bound_float "dial_timeout" (Seconds.value t.dial_timeout) ~min:0.1
-        ~max:300.0;
-      bound_float "read_timeout" (Seconds.value t.read_timeout) ~min:0.1
-        ~max:300.0;
-      bound_float "write_timeout" (Seconds.value t.write_timeout) ~min:0.1
-        ~max:300.0;
+      bound_float "dial_timeout"
+        (Seconds.value t.dial_timeout)
+        ~min:0.1 ~max:300.0;
+      bound_float "read_timeout"
+        (Seconds.value t.read_timeout)
+        ~min:0.1 ~max:300.0;
+      bound_float "write_timeout"
+        (Seconds.value t.write_timeout)
+        ~min:0.1 ~max:300.0;
       bound_float "lookupd_poll_interval"
         (Seconds.value t.lookupd_poll_interval)
         ~min:0.1 ~max:300.0;
