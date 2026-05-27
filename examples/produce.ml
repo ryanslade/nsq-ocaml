@@ -1,4 +1,3 @@
-open Base
 open Eio.Std
 open Nsq
 
@@ -13,16 +12,16 @@ let batch_size = 20
 
 let publish ~clock p =
   let rec loop () =
-    let msg = Int.to_string !published in
+    let msg = string_of_int !published in
     let messages =
-      List.init batch_size ~f:(fun i ->
-          msg ^ ":" ^ Int.to_string i |> Bytes.of_string)
+      List.init batch_size (fun i ->
+          msg ^ ":" ^ string_of_int i |> Bytes.of_string)
     in
     match Producer.publish_multi p (Topic "Test") messages with
-    | Result.Ok _ ->
+    | Ok _ ->
         published := !published + batch_size;
-        if !published >= to_publish then Stdlib.exit 0 else loop ()
-    | Result.Error e ->
+        if !published >= to_publish then exit 0 else loop ()
+    | Error e ->
         Logs.err (fun l -> l "%s" e);
         Eio.Time.sleep clock publish_error_backoff;
         loop ()
@@ -52,11 +51,10 @@ let () =
   let clock = Eio.Stdenv.clock env in
   Switch.run @@ fun sw ->
   let p =
-    Result.ok_or_failwith
+    Result.get_ok
     @@ Producer.create ~sw ~net ~clock ~pool_size:concurrency
          (Host nsqd_address)
   in
   start := Eio.Time.now clock;
   Fiber.all
-    (rate_logger ~clock
-    :: List.init concurrency ~f:(fun _ () -> publish ~clock p))
+    (rate_logger ~clock :: List.init concurrency (fun _ () -> publish ~clock p))

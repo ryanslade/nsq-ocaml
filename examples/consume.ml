@@ -1,4 +1,3 @@
-open Base
 open Eio.Std
 open Nsq
 
@@ -16,7 +15,7 @@ let rate_logger ~clock () =
     let elapsed = Eio.Time.now clock -. !start in
     let per_sec = Float.of_int consumed /. elapsed in
     Logs.debug (fun l -> l "Consumed %d, %f/s" consumed per_sec);
-    if consumed >= expected then Stdlib.exit 0 else loop ()
+    if consumed >= expected then exit 0 else loop ()
   in
   loop ()
 
@@ -26,7 +25,7 @@ let setup_logging level =
   Logs.set_reporter (Logs_fmt.reporter ())
 
 let handler _ =
-  Int.incr consumed;
+  incr consumed;
   `Ok
 
 let () =
@@ -35,7 +34,7 @@ let () =
   let net = Eio.Stdenv.net env in
   let clock = Eio.Stdenv.clock env in
   let config =
-    Consumer.Config.create ~max_in_flight:in_flight () |> Result.ok_or_failwith
+    Consumer.Config.create ~max_in_flight:in_flight () |> Result.get_ok
   in
   let consumer =
     Consumer.create ~net ~clock ~mode:`Nsqd ~config [ Host nsqd_address ]
