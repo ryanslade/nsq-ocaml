@@ -1,4 +1,3 @@
-open Base
 open Eio.Std
 open Nsq
 
@@ -14,16 +13,16 @@ let publish_interval_seconds = 1.0
 
 let test_publish ~sw ~net ~clock () =
   let p =
-    Result.ok_or_failwith @@ Producer.create ~sw ~net ~clock (Host nsqd_address)
+    Result.get_ok @@ Producer.create ~sw ~net ~clock (Host nsqd_address)
   in
   let rec loop () =
-    let msg = Eio.Time.now clock |> Float.to_string |> Bytes.of_string in
+    let msg = Eio.Time.now clock |> string_of_float |> Bytes.of_string in
     Logs.debug (fun l -> l "Publishing: %s" (Bytes.to_string msg));
     match Producer.publish p (Topic "Test") msg with
-    | Result.Ok _ ->
+    | Ok _ ->
         Eio.Time.sleep clock publish_interval_seconds;
         loop ()
-    | Result.Error e ->
+    | Error e ->
         Logs.err (fun l -> l "%s" e);
         Eio.Time.sleep clock publish_error_backoff;
         loop ()
@@ -34,7 +33,7 @@ let create_consumer ~net ~clock ~mode chan_name handler =
   let config =
     Consumer.Config.create ~max_in_flight:100
       ~lookupd_poll_interval:(Seconds.of_float 60.0) ()
-    |> Result.ok_or_failwith
+    |> Result.get_ok
   in
   let host_port =
     match mode with
