@@ -1,6 +1,9 @@
-open Base
 open Eio.Std
 
+let try_with_string f =
+  match f () with v -> Ok v | exception e -> Error (Printexc.to_string e)
+
+let ok_or_failwith = function Ok v -> v | Error e -> failwith e
 let client_version = "0.6.0"
 let default_nsqd_port = 4150
 let default_lookupd_port = 4161
@@ -48,7 +51,7 @@ module Topic = struct
 
   let%expect_test "to_string" =
     List.iter
-      ~f:(fun h -> to_string h |> Stdlib.print_endline)
+      (fun h -> to_string h |> print_endline)
       [ Topic "topic"; TopicEphemeral "topic" ];
     [%expect {|
     topic
@@ -62,7 +65,7 @@ module Channel = struct
 
   let%expect_test "to_string" =
     List.iter
-      ~f:(fun h -> to_string h |> Stdlib.print_endline)
+      (fun h -> to_string h |> print_endline)
       [ Channel "chan"; ChannelEphemeral "chan" ];
     [%expect {|
     chan
@@ -90,22 +93,26 @@ type raw_message = {
 
 module Address = struct
   type t = Host of string | HostPort of string * int
-  [@@deriving sexp_of, compare, hash, equal]
 
   let host s = Host s
   let host_port a p = HostPort (a, p)
+  let compare = Stdlib.compare
+  let equal = ( = )
+  let hash = Hashtbl.hash
 
   let to_string a =
     match a with Host a -> a | HostPort (a, p) -> Printf.sprintf "%s:%d" a p
 
   let%expect_test "to_string" =
     List.iter
-      ~f:(fun h -> to_string h |> Stdlib.print_endline)
+      (fun h -> to_string h |> print_endline)
       [ Host "example.com"; HostPort ("example.com", 123) ];
     [%expect {|
       example.com
       example.com:123 |}]
 end
+
+module Address_set = Hashtbl.Make (Address)
 
 module IdentifyConfig = struct
   (* This will be encoded to JSON and sent with the IDENTIFY command *)
@@ -132,8 +139,6 @@ type command =
   | FIN of MessageID.t
   | RDY of int
   | NOP
-
-let try_with_string f = Result.try_with f |> Result.map_error ~f:Exn.to_string
 
 module ServerMessage = struct
   type t =
@@ -166,47 +171,44 @@ module ServerMessage = struct
     | _ -> Error (Printf.sprintf "Unknown response: %s" body)
 
   let parse_message_body_exn body =
-    let timestamp = Stdlib.String.get_int64_be body 0 in
-    let attempts = Stdlib.String.get_uint16_be body 8 in
+    let timestamp = String.get_int64_be body 0 in
+    let attempts = String.get_uint16_be body 8 in
     let length = String.length body in
-    let id = MessageID.of_string (String.sub body ~pos:10 ~len:16) in
-    let body =
-      Stdlib.Bytes.unsafe_of_string (String.sub body ~pos:26 ~len:(length - 26))
-    in
+    let id = MessageID.of_string (String.sub body 10 16) in
+    let body = Bytes.unsafe_of_string (String.sub body 26 (length - 26)) in
     Message { timestamp; attempts; id; body }
 
   let parse_message_body body =
     try_with_string (fun () -> parse_message_body_exn body)
 
   let parse_error_body body =
-    let open Result in
-    match String.split ~on:' ' body with
+    match String.split_on_char ' ' body with
     | [ code; detail ] -> (
         match code with
-        | "E_INVALID" -> return (ErrorInvalid detail)
-        | "E_BAD_TOPIC" -> return (ErrorBadTopic detail)
-        | "E_BAD_CHANNEL" -> return (ErrorBadChannel detail)
-        | "E_FIN_FAILED" -> return (ErrorFINFailed detail)
-        | "E_REQ_FAILED" -> return (ErrorREQFailed detail)
-        | "E_TOUCH_FAILED" -> return (ErrorTOUCHFailed detail)
-        | _ -> fail (Printf.sprintf "Unknown error code: %s. %s" code detail))
-    | _ ->
-        fail (Printf.sprintf "Malformed error code: %s" body)
+        | "E_INVALID" -> Ok (ErrorInvalid detail)
+        | "E_BAD_TOPIC" -> Ok (ErrorBadTopic detail)
+        | "E_BAD_CHANNEL" -> Ok (ErrorBadChannel detail)
+        | "E_FIN_FAILED" -> Ok (ErrorFINFailed detail)
+        | "E_REQ_FAILED" -> Ok (ErrorREQFailed detail)
+        | "E_TOUCH_FAILED" -> Ok (ErrorTOUCHFailed detail)
+        | _ -> Error (Printf.sprintf "Unknown error code: %s. %s" code detail))
+    | _ -> Error (Printf.sprintf "Malformed error code: %s" body)
 
   let of_raw_frame raw =
     match FrameType.of_int32 raw.frame_type with
     | FrameResponse -> parse_response_body raw.data
     | FrameMessage -> parse_message_body raw.data
     | FrameError -> parse_error_body raw.data
-    | FrameUnknown i ->
-        Result.Error (Printf.sprintf "Unknown frame type: %li" i)
+    | FrameUnknown i -> Error (Printf.sprintf "Unknown frame type: %li" i)
 
   let%expect_test "parse_response_body" =
     let cases = [ "OK"; "_heartbeat_"; "wat" ] in
-    List.iter cases ~f:(fun s ->
+    List.iter
+      (fun s ->
         let r = parse_response_body s in
         let str = match r with Ok m -> to_string m | Error e -> "ERR: " ^ e in
-        Stdlib.print_endline (Printf.sprintf "%s -> %s" s str));
+        print_endline (Printf.sprintf "%s -> %s" s str))
+      cases;
     [%expect
       {|
       OK -> OK
@@ -227,10 +229,12 @@ module ServerMessage = struct
         "malformed";
       ]
     in
-    List.iter cases ~f:(fun s ->
+    List.iter
+      (fun s ->
         let r = parse_error_body s in
         let str = match r with Ok m -> to_string m | Error e -> "ERR: " ^ e in
-        Stdlib.print_endline (Printf.sprintf "%s -> %s" s str));
+        print_endline (Printf.sprintf "%s -> %s" s str))
+      cases;
     [%expect
       {|
       E_INVALID detail -> ErrorInvalid: detail
@@ -245,18 +249,18 @@ module ServerMessage = struct
 
   let%expect_test "parse_message_body round-trip" =
     let header = Bytes.create 26 in
-    Stdlib.Bytes.set_int64_be header 0 1234567890L;
-    Stdlib.Bytes.set_uint16_be header 8 7;
-    Stdlib.Bytes.blit_string "0123456789abcdef" 0 header 10 16;
+    Bytes.set_int64_be header 0 1234567890L;
+    Bytes.set_uint16_be header 8 7;
+    Bytes.blit_string "0123456789abcdef" 0 header 10 16;
     let body = Bytes.to_string header ^ "hello" in
     let r = parse_message_body body in
     (match r with
     | Ok (Message m) ->
-        Stdlib.print_endline
+        print_endline
           (Printf.sprintf "ts=%Ld attempts=%d id=%s body=%s" m.timestamp
              m.attempts (MessageID.to_string m.id) (Bytes.to_string m.body))
-    | Ok _ -> Stdlib.print_endline "unexpected"
-    | Error e -> Stdlib.print_endline ("ERR: " ^ e));
+    | Ok _ -> print_endline "unexpected"
+    | Error e -> print_endline ("ERR: " ^ e));
     [%expect {| ts=1234567890 attempts=7 id=0123456789abcdef body=hello |}]
 
   let%expect_test "of_raw_frame" =
@@ -267,10 +271,12 @@ module ServerMessage = struct
         { frame_type = 99l; data = "" };
       ]
     in
-    List.iter frames ~f:(fun f ->
+    List.iter
+      (fun f ->
         let r = of_raw_frame f in
         let str = match r with Ok m -> to_string m | Error e -> "ERR: " ^ e in
-        Stdlib.print_endline (Printf.sprintf "type=%li -> %s" f.frame_type str));
+        print_endline (Printf.sprintf "type=%li -> %s" f.frame_type str))
+      frames;
     [%expect
       {|
       type=0 -> OK
@@ -294,12 +300,13 @@ module Lookup = struct
   [@@deriving yojson { strict = false }]
 
   let response_of_string s =
-    let open Result in
-    try_with_string (fun () -> Yojson.Safe.from_string s) >>= response_of_yojson
+    Result.bind
+      (try_with_string (fun () -> Yojson.Safe.from_string s))
+      response_of_yojson
 
   let producer_addresses lr =
     List.map
-      ~f:(fun p -> Address.host_port p.broadcast_address p.tcp_port)
+      (fun p -> Address.host_port p.broadcast_address p.tcp_port)
       lr.producers
 
   let%expect_test "response_of_string" =
@@ -308,19 +315,19 @@ module Lookup = struct
     in
     (match response_of_string json with
     | Ok r ->
-        Stdlib.print_endline
+        print_endline
           (Printf.sprintf "channels=%d producers=%d" (List.length r.channels)
              (List.length r.producers));
         List.iter
-          ~f:(fun a -> Stdlib.print_endline (Address.to_string a))
+          (fun a -> print_endline (Address.to_string a))
           (producer_addresses r)
-    | Error e -> Stdlib.print_endline ("ERR: " ^ e));
+    | Error e -> print_endline ("ERR: " ^ e));
     (match response_of_string "not-json" with
-    | Ok _ -> Stdlib.print_endline "unexpected ok"
-    | Error _ -> Stdlib.print_endline "malformed: error");
+    | Ok _ -> print_endline "unexpected ok"
+    | Error _ -> print_endline "malformed: error");
     (match response_of_string "{}" with
-    | Ok _ -> Stdlib.print_endline "unexpected ok"
-    | Error _ -> Stdlib.print_endline "missing fields: error");
+    | Ok _ -> print_endline "unexpected ok"
+    | Error _ -> print_endline "missing fields: error");
     [%expect
       {|
       channels=2 producers=1
@@ -364,7 +371,7 @@ let query_nsqlookupd ~http_client ~sw ~topic a =
              (Http.Status.to_string `OK)
              (Http.Status.to_string status))
   with e ->
-    let s = Exn.to_string e in
+    let s = Printexc.to_string e in
     log_and_return "Querying lookupd" (Error s)
 
 (*
@@ -375,11 +382,13 @@ let query_nsqlookupd ~http_client ~sw ~topic a =
 *)
 let string_of_pub topic data =
   let topic = Topic.to_string topic in
-  let buf = Buffer.create (4 + String.length topic + 1 + 4 + Bytes.length data) in
+  let buf =
+    Buffer.create (4 + String.length topic + 1 + 4 + Bytes.length data)
+  in
   Buffer.add_string buf "PUB ";
   Buffer.add_string buf topic;
   Buffer.add_char buf '\n';
-  Stdlib.Buffer.add_int32_be buf (Int32.of_int_exn (Bytes.length data));
+  Buffer.add_int32_be buf (Int32.of_int (Bytes.length data));
   Buffer.add_bytes buf data;
   Buffer.contents buf
 
@@ -411,9 +420,7 @@ let%expect_test "string_of_pub" =
 *)
 let string_of_mpub topic bodies =
   let topic = Topic.to_string topic in
-  let body_size =
-    List.fold_left ~f:(fun a b -> a + Bytes.length b) ~init:0 bodies
-  in
+  let body_size = List.fold_left (fun a b -> a + Bytes.length b) 0 bodies in
   let num_messages = List.length bodies in
   let buf =
     Buffer.create
@@ -422,11 +429,11 @@ let string_of_mpub topic bodies =
   Buffer.add_string buf "MPUB ";
   Buffer.add_string buf topic;
   Buffer.add_char buf '\n';
-  Stdlib.Buffer.add_int32_be buf (Int32.of_int_exn body_size);
-  Stdlib.Buffer.add_int32_be buf (Int32.of_int_exn num_messages);
+  Buffer.add_int32_be buf (Int32.of_int body_size);
+  Buffer.add_int32_be buf (Int32.of_int num_messages);
   List.iter
-    ~f:(fun data ->
-      Stdlib.Buffer.add_int32_be buf (Int32.of_int_exn (Bytes.length data));
+    (fun data ->
+      Buffer.add_int32_be buf (Int32.of_int (Bytes.length data));
       Buffer.add_bytes buf data)
     bodies;
   Buffer.contents buf
@@ -454,7 +461,7 @@ let string_of_identify c =
   let length = String.length data in
   let buf = Buffer.create (9 + 4 + length) in
   Buffer.add_string buf "IDENTIFY\n";
-  Stdlib.Buffer.add_int32_be buf (Int32.of_int_exn length);
+  Buffer.add_int32_be buf (Int32.of_int length);
   Buffer.add_string buf data;
   Buffer.contents buf
 
@@ -528,7 +535,7 @@ let%expect_test "string_of_command" =
     ]
   in
   List.iter
-    ~f:(fun c ->
+    (fun c ->
       string_of_command c |> Hex.of_string |> Hex.hexdump ~print_chars:false)
     commands;
   [%expect
@@ -566,13 +573,11 @@ type conn = {
 (* Timeout will only apply if > 0.0 *)
 let maybe_timeout ~clock ~timeout f =
   let timeout = Seconds.value timeout in
-  if Float.(timeout <= 0.0) then f ()
-  else Eio.Time.with_timeout_exn clock timeout f
+  if timeout <= 0.0 then f () else Eio.Time.with_timeout_exn clock timeout f
 
 let send ~clock ~timeout ~conn command =
   let data = string_of_command command in
-  maybe_timeout ~clock ~timeout (fun () ->
-      Eio.Flow.copy_string data conn.flow)
+  maybe_timeout ~clock ~timeout (fun () -> Eio.Flow.copy_string data conn.flow)
 
 let connect ~sw ~net ~clock ~rng host timeout =
   let host, port =
@@ -581,12 +586,12 @@ let connect ~sw ~net ~clock ~rng host timeout =
     | Address.HostPort (h, p) -> (h, p)
   in
   let addrs =
-    Eio.Net.getaddrinfo_stream net host ~service:(Int.to_string port)
+    Eio.Net.getaddrinfo_stream net host ~service:(string_of_int port)
   in
   let addr =
     match addrs with
     | [] -> failwith (Printf.sprintf "No addresses for %s" host)
-    | xs -> List.random_element_exn ~random_state:rng xs
+    | xs -> List.nth xs (Random.State.int rng (List.length xs))
   in
   maybe_timeout ~clock ~timeout (fun () ->
       let flow = Eio.Net.connect ~sw net addr in
@@ -597,7 +602,7 @@ let connect ~sw ~net ~clock ~rng host timeout =
       { flow; reader })
 
 let read_raw_frame ~clock ~timeout conn =
-  let size = Eio.Buf_read.BE.uint32 conn.reader |> Int32.to_int_exn in
+  let size = Eio.Buf_read.BE.uint32 conn.reader |> Int32.to_int in
   maybe_timeout ~clock ~timeout (fun () ->
       let frame_type = Eio.Buf_read.BE.uint32 conn.reader in
       let data = Eio.Buf_read.take (size - 4) conn.reader in
@@ -647,41 +652,65 @@ module Consumer = struct
       output_buffer_timeout : Seconds.t;
       sample_rate : int; (* Between 0 and 99 *)
     }
-    [@@deriving fields]
 
     let validate t =
-      let module V = Core.Validate in
-      let module Maybe_bound = Core.Maybe_bound in
-      let w check = V.field_folder check t in
-      let bound_int ~min ~max =
-        Core.Int.validate_bound ~min:(Maybe_bound.Incl min)
-          ~max:(Maybe_bound.Incl max)
+      let errs = ref [] in
+      let err msg = errs := msg :: !errs in
+      let bound_int name v ~min ~max =
+        if v < min || v > max then
+          err (Printf.sprintf "%s = %d not in [%d, %d]" name v min max)
       in
-      let bound_float ~min ~max =
-        Core.Float.validate_bound ~min:(Maybe_bound.Incl min)
-          ~max:(Maybe_bound.Incl max)
+      let bound_float name v ~min ~max =
+        if v < min || v > max then
+          err (Printf.sprintf "%s = %f not in [%f, %f]" name v min max)
       in
-      let string_not_blank s = String.is_empty s |> not in
-      V.of_list
-        (Fields.fold ~init:[]
-           ~max_in_flight:(w Core.Int.validate_positive)
-           ~max_attempts:(w (bound_int ~min:0 ~max:65535))
-           ~dial_timeout:(w (bound_float ~min:0.1 ~max:300.0))
-           ~read_timeout:(w (bound_float ~min:0.1 ~max:300.0))
-           ~write_timeout:(w (bound_float ~min:0.1 ~max:300.0))
-           ~lookupd_poll_interval:(w (bound_float ~min:0.1 ~max:300.0))
-           ~default_requeue_delay:(w (bound_float ~min:0.0 ~max:3600.0))
-           ~max_requeue_delay:(w (bound_float ~min:0.0 ~max:3600.0))
-           ~lookupd_poll_jitter:(w (bound_float ~min:0.0 ~max:1.0))
-           ~output_buffer_timeout:(w (bound_float ~min:0.01 ~max:300.0))
-           ~output_buffer_size:(w (bound_int ~min:64 ~max:(5 * 1025 * 1000)))
-           ~sample_rate:(w (bound_int ~min:0 ~max:99))
-           ~heartbeat_interval:(w (bound_float ~min:1.0 ~max:300.0))
-           ~client_id:(w (V.booltest string_not_blank ~if_false:"blank"))
-           ~hostname:(w (V.booltest string_not_blank ~if_false:"blank"))
-           ~user_agent:(w (V.booltest string_not_blank ~if_false:"blank"))
-           ~error_threshold:(w (bound_int ~min:1 ~max:10000))
-           ~backoff_multiplier:(w Core.Float.validate_positive))
+      let positive_int name v =
+        if v <= 0 then err (Printf.sprintf "%s = %d must be positive" name v)
+      in
+      let positive_float name v =
+        if v <= 0.0 then err (Printf.sprintf "%s = %f must be positive" name v)
+      in
+      let non_blank name v =
+        if v = "" then err (Printf.sprintf "%s must not be blank" name)
+      in
+      positive_int "max_in_flight" t.max_in_flight;
+      bound_int "max_attempts" t.max_attempts ~min:0 ~max:65535;
+      bound_float "dial_timeout"
+        (Seconds.value t.dial_timeout)
+        ~min:0.1 ~max:300.0;
+      bound_float "read_timeout"
+        (Seconds.value t.read_timeout)
+        ~min:0.1 ~max:300.0;
+      bound_float "write_timeout"
+        (Seconds.value t.write_timeout)
+        ~min:0.1 ~max:300.0;
+      bound_float "lookupd_poll_interval"
+        (Seconds.value t.lookupd_poll_interval)
+        ~min:0.1 ~max:300.0;
+      bound_float "default_requeue_delay"
+        (Seconds.value t.default_requeue_delay)
+        ~min:0.0 ~max:3600.0;
+      bound_float "max_requeue_delay"
+        (Seconds.value t.max_requeue_delay)
+        ~min:0.0 ~max:3600.0;
+      bound_float "lookupd_poll_jitter" t.lookupd_poll_jitter ~min:0.0 ~max:1.0;
+      bound_float "output_buffer_timeout"
+        (Seconds.value t.output_buffer_timeout)
+        ~min:0.01 ~max:300.0;
+      bound_int "output_buffer_size" t.output_buffer_size ~min:64
+        ~max:(5 * 1025 * 1000);
+      bound_int "sample_rate" t.sample_rate ~min:0 ~max:99;
+      bound_float "heartbeat_interval"
+        (Seconds.value t.heartbeat_interval)
+        ~min:1.0 ~max:300.0;
+      non_blank "client_id" t.client_id;
+      non_blank "hostname" t.hostname;
+      non_blank "user_agent" t.user_agent;
+      bound_int "error_threshold" t.error_threshold ~min:1 ~max:10000;
+      positive_float "backoff_multiplier" t.backoff_multiplier;
+      match !errs with
+      | [] -> Ok t
+      | es -> Error (String.concat "; " (List.rev es))
 
     let create ?(max_in_flight = 1) ?(max_attempts = 5)
         ?(backoff_multiplier = 0.5) ?(error_threshold = 1)
@@ -719,8 +748,7 @@ module Consumer = struct
           sample_rate;
         }
       in
-      Core.Validate.valid_or_error validate t
-      |> Result.map_error ~f:Error.to_string_hum
+      validate t
 
     let to_identity_config c =
       {
@@ -738,8 +766,8 @@ module Consumer = struct
     let%expect_test "create validation" =
       let show name r =
         match r with
-        | Ok _ -> Stdlib.print_endline (name ^ " -> ok")
-        | Error _ -> Stdlib.print_endline (name ^ " -> error")
+        | Ok _ -> print_endline (name ^ " -> ok")
+        | Error _ -> print_endline (name ^ " -> error")
       in
       show "defaults" (create ());
       show "max_in_flight=0" (create ~max_in_flight:0 ());
@@ -768,7 +796,7 @@ module Consumer = struct
     clock : clock;
     addresses : Address.t list;
     (* The number of open NSQD connections *)
-    open_connections : Address.t Hash_set.t;
+    open_connections : unit Address_set.t;
     topic : Topic.t;
     channel : Channel.t;
     handler : bytes -> [ `Ok | `Requeue ];
@@ -788,9 +816,9 @@ module Consumer = struct
   let%expect_test "backoff_duration" =
     let test_cases = [ (1.0, 1); (1.0, 2); (2.0, 4000) ] in
     List.iteri
-      ~f:(fun i (multiplier, error_count) ->
+      (fun i (multiplier, error_count) ->
         let r = backoff_duration ~multiplier ~error_count in
-        Stdlib.print_endline
+        print_endline
           (Printf.sprintf "Case %d: Backoff = %f" i (Seconds.value r)))
       test_cases;
     [%expect
@@ -800,9 +828,9 @@ module Consumer = struct
       Case 2: Backoff = 600.000000 |}]
 
   let create ~net ~clock ?(mode = `Nsqd)
-      ?(config = Config.create () |> Result.ok_or_failwith) addresses topic
-      channel handler =
-    let open_connections = Hash_set.create (module Address) in
+      ?(config = Config.create () |> ok_or_failwith) addresses topic channel
+      handler =
+    let open_connections = Address_set.create 16 in
     {
       net :> net;
       clock :> clock;
@@ -827,11 +855,13 @@ module Consumer = struct
     let cases =
       [ (0, 10); (1, 1); (2, 1); (2, 10); (3, 10); (4, 4); (10, 100) ]
     in
-    List.iter cases ~f:(fun (connection_count, max_in_flight) ->
+    List.iter
+      (fun (connection_count, max_in_flight) ->
         let r = calc_rdy ~connection_count ~max_in_flight in
-        Stdlib.print_endline
+        print_endline
           (Printf.sprintf "conns=%d max=%d -> %d" connection_count max_in_flight
-             r));
+             r))
+      cases;
     [%expect
       {|
       conns=0 max=10 -> 1
@@ -845,7 +875,7 @@ module Consumer = struct
 
   let rdy_per_connection c =
     calc_rdy
-      ~connection_count:(Hash_set.length c.open_connections)
+      ~connection_count:(Address_set.length c.open_connections)
       ~max_in_flight:c.config.max_in_flight
 
   let do_after_async ~sw ~clock ~duration f =
@@ -858,8 +888,8 @@ module Consumer = struct
   let handle_message handler msg max_attempts =
     let requeue_delay attempts =
       let d = Milliseconds.value default_requeue_delay in
-      let attempts = Int64.of_int_exn attempts in
-      Milliseconds.of_int64 Int64.(d * attempts)
+      let attempts = Int64.of_int attempts in
+      Milliseconds.of_int64 (Int64.mul d attempts)
     in
     let handler_result =
       match try_with_string (fun () -> handler msg.body) with
@@ -908,9 +938,11 @@ module Consumer = struct
         ("handler raises at max", (fun _ -> failwith "boom"), mk_msg 5, 5);
       ]
     in
-    List.iter cases ~f:(fun (name, h, msg, max_attempts) ->
+    List.iter
+      (fun (name, h, msg, max_attempts) ->
         let r = handle_message h msg max_attempts in
-        Stdlib.print_endline (Printf.sprintf "%s -> %s" name (show_cmd r)));
+        print_endline (Printf.sprintf "%s -> %s" name (show_cmd r)))
+      cases;
     [%expect
       {|
       ok -> FIN
@@ -1023,11 +1055,13 @@ module Consumer = struct
         ("Err+HalfOpen reopens", req, { position = HalfOpen; error_count = 2 });
       ]
     in
-    List.iter cases ~f:(fun (name, cmd, bs) ->
+    List.iter
+      (fun (name, cmd, bs) ->
         let bs', act = next cmd bs in
-        Stdlib.print_endline
+        print_endline
           (Printf.sprintf "%s -> {%s, %d} %s" name (show_pos bs'.position)
-             bs'.error_count (show_action act)));
+             bs'.error_count (show_action act)))
+      cases;
     [%expect
       {|
       NOP keeps state -> {Open, 99} NoAction
@@ -1134,19 +1168,19 @@ module Consumer = struct
       in
       match conn with
       | Ok conn ->
-          Hash_set.add c.open_connections address;
+          Address_set.replace c.open_connections address ();
           Logs.debug (fun l ->
               l "%s %d connections" c.log_prefix
-                (Hash_set.length c.open_connections));
+                (Address_set.length c.open_connections));
           (try consume ~sw c conn mbox
            with e ->
-             Logs.err (fun l -> l "Consumer error: %s" (Exn.to_string e));
+             Logs.err (fun l -> l "Consumer error: %s" (Printexc.to_string e));
              Eio.Time.sleep c.clock (Seconds.value default_backoff));
           (* Error consuming. If we get here it means that something failed and we need to reconnect *)
-          Hash_set.remove c.open_connections address;
+          Address_set.remove c.open_connections address;
           Logs.debug (fun l ->
               l "%s %d connections" c.log_prefix
-                (Hash_set.length c.open_connections));
+                (Address_set.length c.open_connections));
           let error_count = 1 in
           loop error_count
       | Error e ->
@@ -1205,9 +1239,8 @@ module Consumer = struct
   let start_polling_lookupd ~sw c =
     let http_client = Cohttp_eio.Client.make ~https:None c.net in
     let poll_interval =
-      Float.(
-        (1.0 + Random.State.float c.rng c.config.lookupd_poll_jitter)
-        * Seconds.value c.config.lookupd_poll_interval)
+      (1.0 +. Random.State.float c.rng c.config.lookupd_poll_jitter)
+      *. Seconds.value c.config.lookupd_poll_interval
     in
     let rec check_for_producers () =
       try
@@ -1220,18 +1253,27 @@ module Consumer = struct
                   query_nsqlookupd ~http_client ~sw ~topic:c.topic a))
             c.addresses
         in
-        let discovered_producers =
-          List.filter_map ~f:Result.ok results
-          |> List.map ~f:Lookup.producer_addresses
-          |> List.join
-          |> Hash_set.of_list (module Address)
-        in
+        let discovered_producers = Address_set.create 16 in
+        List.iter
+          (fun r ->
+            match r with
+            | Ok lr ->
+                List.iter
+                  (fun a -> Address_set.replace discovered_producers a ())
+                  (Lookup.producer_addresses lr)
+            | Error _ -> ())
+          results;
         let running = c.open_connections in
-        let new_producers = Hash_set.diff discovered_producers running in
+        let new_producers = Address_set.create 16 in
+        Address_set.iter
+          (fun a () ->
+            if not (Address_set.mem running a) then
+              Address_set.replace new_producers a ())
+          discovered_producers;
         Logs.debug (fun l ->
-            l "Found %d new producers" (Hash_set.length new_producers));
-        Hash_set.iter
-          ~f:(fun a ->
+            l "Found %d new producers" (Address_set.length new_producers));
+        Address_set.iter
+          (fun a () ->
             Fiber.fork ~sw (fun () ->
                 Logs.debug (fun l ->
                     l "Starting consumer for: %s" (Address.to_string a));
@@ -1240,7 +1282,7 @@ module Consumer = struct
         Eio.Time.sleep c.clock poll_interval;
         check_for_producers ()
       with e ->
-        Logs.err (fun l -> l "Error polling lookupd: %s" (Exn.to_string e));
+        Logs.err (fun l -> l "Error polling lookupd: %s" (Printexc.to_string e));
         Eio.Time.sleep c.clock (Seconds.value default_backoff);
         check_for_producers ()
     in
@@ -1283,7 +1325,7 @@ module Producer = struct
     let validate c =
       let now = Eio.Time.now clock in
       let diff = now -. c.last_write in
-      Float.(diff < ttl_seconds)
+      diff < ttl_seconds
     in
     let dispose c =
       Logs.warn (fun l -> l "Closing pooled producer connection");
@@ -1334,7 +1376,7 @@ module Producer = struct
       let message =
         Printf.sprintf "Publishing to `%s`: %s"
           (Address.to_string t.address)
-          (Exn.to_string e)
+          (Printexc.to_string e)
       in
       Error message
 

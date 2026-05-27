@@ -21,14 +21,13 @@
  (depends
   (ocaml (>= 5.4.1))
   (dune (>= 3.0))
-  core
   (eio (>= 1.0))
   (eio_main (>= 1.0))
   cohttp
   cohttp-eio
   yojson
   ppx_deriving_yojson
-  ppx_jane
+  ppx_expect
   logs
   fmt
   hex

@@ -1,4 +1,3 @@
-open Base
 open Eio.Std
 
 let check_result prefix r =
@@ -13,7 +12,7 @@ let test_publish_and_consume env () =
   let topic = Topic.Topic "Integration" in
   let channel = Channel.Channel "integration" in
   let payload = Bytes.of_string "message" in
-  let stream = Eio.Stream.create Int.max_value in
+  let stream = Eio.Stream.create Int.max_int in
   (* Handler returns payload to stream *)
   let handler data =
     Eio.Stream.add stream data;
@@ -50,7 +49,7 @@ let test_lookupd_mode env () =
   let topic = Topic.Topic "IntegrationLookupd" in
   let channel = Channel.Channel "lookupd_test" in
   let payload = Bytes.of_string "lookupd message" in
-  let stream = Eio.Stream.create Int.max_value in
+  let stream = Eio.Stream.create Int.max_int in
   let handler data =
     Eio.Stream.add stream data;
     `Ok

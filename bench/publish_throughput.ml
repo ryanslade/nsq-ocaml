@@ -4,9 +4,10 @@
     batched [-batch] per call), and reports wall time, CPU, throughput, and GC
     allocation stats. *)
 
-open Base
 open Eio.Std
 open Nsq
+
+let ok_or_failwith = function Ok v -> v | Error e -> failwith e
 
 type args = {
   host : string;
@@ -36,8 +37,7 @@ let parse_args () =
       ("-pool", Stdlib.Arg.Set_int pool_size, " producer pool size");
     ]
   in
-  Stdlib.Arg.parse
-    (Stdlib.Arg.align specs)
+  Stdlib.Arg.parse (Stdlib.Arg.align specs)
     (fun _ -> ())
     "publish_throughput [options]";
   {
@@ -50,11 +50,10 @@ let parse_args () =
   }
 
 let pp_bytes f =
-  let open Float in
-  if f >= 1024. ** 3. then Stdlib.Printf.sprintf "%.2f GiB" (f / (1024. ** 3.))
-  else if f >= 1024. ** 2. then Stdlib.Printf.sprintf "%.2f MiB" (f / (1024. ** 2.))
-  else if f >= 1024. then Stdlib.Printf.sprintf "%.2f KiB" (f / 1024.)
-  else Stdlib.Printf.sprintf "%.0f B" f
+  if f >= 1024. ** 3. then Printf.sprintf "%.2f GiB" (f /. (1024. ** 3.))
+  else if f >= 1024. ** 2. then Printf.sprintf "%.2f MiB" (f /. (1024. ** 2.))
+  else if f >= 1024. then Printf.sprintf "%.2f KiB" (f /. 1024.)
+  else Printf.sprintf "%.0f B" f
 
 let publish_one ~p ~topic ~payload ~batch ~batch_size =
   let r =
@@ -65,8 +64,7 @@ let publish_one ~p ~topic ~payload ~batch ~batch_size =
 
 let run args =
   if args.batch_size < 1 then failwith "-batch must be >= 1";
-  if args.count < args.batch_size then
-    failwith "-n must be >= -batch";
+  if args.count < args.batch_size then failwith "-n must be >= -batch";
   Eio_main.run @@ fun env ->
   let net = Eio.Stdenv.net env in
   let clock = Eio.Stdenv.clock env in
@@ -74,13 +72,15 @@ let run args =
   let p =
     Producer.create ~sw ~net ~clock ~pool_size:args.pool_size
       (Address.Host args.host)
-    |> Result.ok_or_failwith
+    |> ok_or_failwith
   in
   let topic = Topic.Topic args.topic in
   let payload = Bytes.make args.payload_size 'x' in
-  let batch = List.init args.batch_size ~f:(fun _ -> payload) in
+  let batch = List.init args.batch_size (fun _ -> payload) in
   let batches = args.count / args.batch_size in
-  let publish_one () = publish_one ~p ~topic ~payload ~batch ~batch_size:args.batch_size in
+  let publish_one () =
+    publish_one ~p ~topic ~payload ~batch ~batch_size:args.batch_size
+  in
 
   (* Warm-up: one publish to populate the connection. Not counted. *)
   publish_one ();
@@ -101,7 +101,7 @@ let run args =
   let wall = t1 -. t0 in
   let user = cpu1.tms_utime -. cpu0.tms_utime in
   let sys = cpu1.tms_stime -. cpu0.tms_stime in
-  let cpu_pct = if Float.(wall > 0.) then (user +. sys) /. wall *. 100. else 0. in
+  let cpu_pct = if wall > 0. then (user +. sys) /. wall *. 100. else 0. in
   let total_msgs = batches * args.batch_size in
   let total_bytes = total_msgs * args.payload_size in
   let msgs_per_sec = Float.of_int total_msgs /. wall in
@@ -116,7 +116,8 @@ let run args =
   Stdlib.Printf.printf "  host:            %s\n" args.host;
   Stdlib.Printf.printf "  topic:           %s\n" args.topic;
   Stdlib.Printf.printf "  total messages:  %d\n" total_msgs;
-  Stdlib.Printf.printf "  batch size:      %d (%d calls)\n" args.batch_size batches;
+  Stdlib.Printf.printf "  batch size:      %d (%d calls)\n" args.batch_size
+    batches;
   Stdlib.Printf.printf "  payload size:    %d B\n" args.payload_size;
   Stdlib.Printf.printf "  pool size:       %d\n" args.pool_size;
   Stdlib.print_endline "";
@@ -127,8 +128,8 @@ let run args =
   Stdlib.Printf.printf "  throughput:      %.0f msgs/s   %s/s\n" msgs_per_sec
     (pp_bytes bytes_per_sec);
   Stdlib.print_endline "";
-  Stdlib.Printf.printf "  allocated:       %s total, %.1f B/msg\n" (pp_bytes allocated)
-    (per_msg allocated);
+  Stdlib.Printf.printf "  allocated:       %s total, %.1f B/msg\n"
+    (pp_bytes allocated) (per_msg allocated);
   Stdlib.Printf.printf "  minor words:     %.3e total, %.1f /msg\n" minor
     (per_msg minor);
   Stdlib.Printf.printf "  promoted words:  %.3e total, %.1f /msg\n" promoted
@@ -139,6 +140,7 @@ let run args =
     (gc1.minor_collections - gc0.minor_collections);
   Stdlib.Printf.printf "  major GCs:       %d\n"
     (gc1.major_collections - gc0.major_collections);
-  Stdlib.Printf.printf "  compactions:     %d\n" (gc1.compactions - gc0.compactions)
+  Stdlib.Printf.printf "  compactions:     %d\n"
+    (gc1.compactions - gc0.compactions)
 
 let () = run (parse_args ())
