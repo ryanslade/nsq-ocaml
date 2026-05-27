@@ -4,9 +4,10 @@
     batched [-batch] per call), and reports wall time, CPU, throughput, and GC
     allocation stats. *)
 
-open Base
 open Eio.Std
 open Nsq
+
+let ok_or_failwith = function Ok v -> v | Error e -> failwith e
 
 type args = {
   host : string;
@@ -50,11 +51,10 @@ let parse_args () =
   }
 
 let pp_bytes f =
-  let open Float in
-  if f >= 1024. ** 3. then Stdlib.Printf.sprintf "%.2f GiB" (f / (1024. ** 3.))
-  else if f >= 1024. ** 2. then Stdlib.Printf.sprintf "%.2f MiB" (f / (1024. ** 2.))
-  else if f >= 1024. then Stdlib.Printf.sprintf "%.2f KiB" (f / 1024.)
-  else Stdlib.Printf.sprintf "%.0f B" f
+  if f >= 1024. ** 3. then Printf.sprintf "%.2f GiB" (f /. (1024. ** 3.))
+  else if f >= 1024. ** 2. then Printf.sprintf "%.2f MiB" (f /. (1024. ** 2.))
+  else if f >= 1024. then Printf.sprintf "%.2f KiB" (f /. 1024.)
+  else Printf.sprintf "%.0f B" f
 
 let publish_one ~p ~topic ~payload ~batch ~batch_size =
   let r =
@@ -74,11 +74,11 @@ let run args =
   let p =
     Producer.create ~sw ~net ~clock ~pool_size:args.pool_size
       (Address.Host args.host)
-    |> Result.ok_or_failwith
+    |> ok_or_failwith
   in
   let topic = Topic.Topic args.topic in
   let payload = Bytes.make args.payload_size 'x' in
-  let batch = List.init args.batch_size ~f:(fun _ -> payload) in
+  let batch = List.init args.batch_size (fun _ -> payload) in
   let batches = args.count / args.batch_size in
   let publish_one () = publish_one ~p ~topic ~payload ~batch ~batch_size:args.batch_size in
 
@@ -101,7 +101,7 @@ let run args =
   let wall = t1 -. t0 in
   let user = cpu1.tms_utime -. cpu0.tms_utime in
   let sys = cpu1.tms_stime -. cpu0.tms_stime in
-  let cpu_pct = if Float.(wall > 0.) then (user +. sys) /. wall *. 100. else 0. in
+  let cpu_pct = if wall > 0. then (user +. sys) /. wall *. 100. else 0. in
   let total_msgs = batches * args.batch_size in
   let total_bytes = total_msgs * args.payload_size in
   let msgs_per_sec = Float.of_int total_msgs /. wall in
