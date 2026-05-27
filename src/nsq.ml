@@ -96,7 +96,7 @@ module Address = struct
 
   let host s = Host s
   let host_port a p = HostPort (a, p)
-  let compare = Stdlib.compare
+  let compare = compare
   let equal = ( = )
   let hash = Hashtbl.hash
 
