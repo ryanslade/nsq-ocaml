@@ -1,4 +1,5 @@
 open Eio.Std
+open! Ppx_yojson_conv_lib.Yojson_conv.Primitives
 
 let try_with_string f =
   match f () with v -> Ok v | exception e -> Error (Printexc.to_string e)
@@ -126,7 +127,7 @@ module IdentifyConfig = struct
     output_buffer_timeout : Milliseconds.t;
     sample_rate : int;
   }
-  [@@deriving yojson { strict = false }]
+  [@@deriving yojson] [@@yojson.allow_extra_fields]
 end
 
 type command =
@@ -294,15 +295,13 @@ module Lookup = struct
     http_port : int;
     version : string;
   }
-  [@@deriving yojson { strict = false }]
+  [@@deriving yojson] [@@yojson.allow_extra_fields]
 
   type response = { channels : string list; producers : producer list }
-  [@@deriving yojson { strict = false }]
+  [@@deriving yojson] [@@yojson.allow_extra_fields]
 
   let response_of_string s =
-    Result.bind
-      (try_with_string (fun () -> Yojson.Safe.from_string s))
-      response_of_yojson
+    try_with_string (fun () -> Yojson.Safe.from_string s |> response_of_yojson)
 
   let producer_addresses lr =
     List.map
@@ -457,7 +456,7 @@ let%expect_test "string_of_mpub" =
    [ 4-byte size in bytes ][ N-byte JSON data ]
 *)
 let string_of_identify c =
-  let data = IdentifyConfig.to_yojson c |> Yojson.Safe.to_string in
+  let data = IdentifyConfig.yojson_of_t c |> Yojson.Safe.to_string in
   let length = String.length data in
   let buf = Buffer.create (9 + 4 + length) in
   Buffer.add_string buf "IDENTIFY\n";

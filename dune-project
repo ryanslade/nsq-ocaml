@@ -26,7 +26,7 @@
   cohttp
   cohttp-eio
   yojson
-  ppx_deriving_yojson
+  ppx_yojson_conv
   ppx_expect
   logs
   fmt
