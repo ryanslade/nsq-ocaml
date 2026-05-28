@@ -4,13 +4,13 @@
  (inline_tests
   (flags (-show-counts)))
  (preprocess
-  (pps ppx_deriving_yojson ppx_expect))
+  (pps ppx_yojson_conv ppx_expect))
  (libraries
   eio
   eio.unix
   cohttp
   cohttp-eio
   yojson
-  ppx_deriving_yojson.runtime
+  ppx_yojson_conv_lib
   hex
   logs))
