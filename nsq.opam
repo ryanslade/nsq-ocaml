@@ -9,7 +9,7 @@ homepage: "https://github.com/ryanslade/nsq-ocaml"
 bug-reports: "https://github.com/ryanslade/nsq-ocaml/issues"
 depends: [
   "ocaml" {>= "5.4.1"}
-  "dune" {>= "3.0"}
+  "dune" {>= "3.0" & >= "3.0"}
   "eio" {>= "1.0"}
   "eio_main" {>= "1.0"}
   "cohttp"
