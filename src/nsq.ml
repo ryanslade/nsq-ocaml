@@ -182,9 +182,14 @@ module ServerMessage = struct
   let parse_message_body body =
     try_with_string (fun () -> parse_message_body_exn body)
 
+  (* Error frames are "<code> <description>", where the description may itself
+     contain spaces *)
   let parse_error_body body =
-    match String.split_on_char ' ' body with
-    | [ code; detail ] -> (
+    match String.index_opt body ' ' with
+    | None -> Error (Printf.sprintf "Malformed error code: %s" body)
+    | Some i -> (
+        let code = String.sub body 0 i in
+        let detail = String.sub body (i + 1) (String.length body - i - 1) in
         match code with
         | "E_INVALID" -> Ok (ErrorInvalid detail)
         | "E_BAD_TOPIC" -> Ok (ErrorBadTopic detail)
@@ -193,7 +198,6 @@ module ServerMessage = struct
         | "E_REQ_FAILED" -> Ok (ErrorREQFailed detail)
         | "E_TOUCH_FAILED" -> Ok (ErrorTOUCHFailed detail)
         | _ -> Error (Printf.sprintf "Unknown error code: %s. %s" code detail))
-    | _ -> Error (Printf.sprintf "Malformed error code: %s" body)
 
   let of_raw_frame raw =
     match FrameType.of_int32 raw.frame_type with
@@ -227,6 +231,7 @@ module ServerMessage = struct
         "E_REQ_FAILED detail";
         "E_TOUCH_FAILED detail";
         "E_UNKNOWN detail";
+        {|E_BAD_TOPIC PUB topic name "bad!topic" is not valid|};
         "malformed";
       ]
     in
@@ -245,6 +250,7 @@ module ServerMessage = struct
       E_REQ_FAILED detail -> ErrorREQFailed: detail
       E_TOUCH_FAILED detail -> ErrTouchFailed: detail
       E_UNKNOWN detail -> ERR: Unknown error code: E_UNKNOWN. detail
+      E_BAD_TOPIC PUB topic name "bad!topic" is not valid -> ErrorBadTopic: PUB topic name "bad!topic" is not valid
       malformed -> ERR: Malformed error code: malformed
       |}]
 
@@ -600,9 +606,11 @@ let connect ~sw ~net ~clock ~rng host timeout =
       in
       { flow; reader })
 
+(* The timeout covers waiting for the size header, which is where we block when
+   the connection is idle or silently dead *)
 let read_raw_frame ~clock ~timeout conn =
-  let size = Eio.Buf_read.BE.uint32 conn.reader |> Int32.to_int in
   maybe_timeout ~clock ~timeout (fun () ->
+      let size = Eio.Buf_read.BE.uint32 conn.reader |> Int32.to_int in
       let frame_type = Eio.Buf_read.BE.uint32 conn.reader in
       let data = Eio.Buf_read.take (size - 4) conn.reader in
       { frame_type; data })
@@ -702,6 +710,14 @@ module Consumer = struct
       bound_float "heartbeat_interval"
         (Seconds.value t.heartbeat_interval)
         ~min:1.0 ~max:300.0;
+      (* Heartbeats are the only traffic on an idle connection, so they must
+         arrive within read_timeout *)
+      if Seconds.value t.heartbeat_interval >= Seconds.value t.read_timeout then
+        err
+          (Printf.sprintf
+             "heartbeat_interval = %f must be less than read_timeout = %f"
+             (Seconds.value t.heartbeat_interval)
+             (Seconds.value t.read_timeout));
       non_blank "client_id" t.client_id;
       non_blank "hostname" t.hostname;
       non_blank "user_agent" t.user_agent;
@@ -718,7 +734,7 @@ module Consumer = struct
         ?(write_timeout = Seconds.of_float 1.0)
         ?(lookupd_poll_interval = Seconds.of_float 60.0)
         ?(lookupd_poll_jitter = 0.3)
-        ?(heartbeat_interval = Seconds.of_float 60.0)
+        ?(heartbeat_interval = Seconds.of_float 30.0)
         ?(max_requeue_delay = Seconds.of_float (15.0 *. 60.0))
         ?(default_requeue_delay = Seconds.of_float 90.0)
         ?(client_id = Unix.gethostname ()) ?(hostname = Unix.gethostname ())
@@ -775,6 +791,9 @@ module Consumer = struct
       show "lookupd_poll_jitter=1.5" (create ~lookupd_poll_jitter:1.5 ());
       show "client_id blank" (create ~client_id:"" ());
       show "max_attempts=-1" (create ~max_attempts:(-1) ());
+      show "heartbeat_interval=read_timeout"
+        (create ~heartbeat_interval:(Seconds.of_float 60.0)
+           ~read_timeout:(Seconds.of_float 60.0) ());
       [%expect
         {|
         defaults -> ok
@@ -784,6 +803,7 @@ module Consumer = struct
         lookupd_poll_jitter=1.5 -> error
         client_id blank -> error
         max_attempts=-1 -> error
+        heartbeat_interval=read_timeout -> error
         |}]
   end
 
@@ -1300,7 +1320,14 @@ end
 module Producer = struct
   type net = [ `Generic ] Eio.Net.ty Eio.Resource.t
   type clock = float Eio.Time.clock_ty Eio.Resource.t
-  type connection = { conn : conn; mutable last_write : float }
+
+  (* [healthy] is cleared when a publish fails, since the stream may then be
+     closed by nsqd or left part way through a frame *)
+  type connection = {
+    conn : conn;
+    mutable last_write : float;
+    mutable healthy : bool;
+  }
 
   type t = {
     net : net;
@@ -1324,7 +1351,7 @@ module Producer = struct
     let validate c =
       let now = Eio.Time.now clock in
       let diff = now -. c.last_write in
-      diff < ttl_seconds
+      c.healthy && diff < ttl_seconds
     in
     let dispose c =
       Logs.warn (fun l -> l "Closing pooled producer connection");
@@ -1334,7 +1361,7 @@ module Producer = struct
         let conn = connect ~sw ~net ~clock ~rng address default_dial_timeout in
         send ~clock ~timeout:default_write_timeout ~conn MAGIC;
         let last_write = Eio.Time.now clock in
-        { conn; last_write })
+        { conn; last_write; healthy = true })
 
   let create ~sw ~net ~clock ?(pool_size = default_pool_size) address =
     if pool_size < 1 then Error "Pool size must be >= 1"
@@ -1363,12 +1390,24 @@ module Producer = struct
             send ~clock:t.clock ~timeout:default_write_timeout ~conn:c.conn NOP;
             c.last_write <- Eio.Time.now t.clock;
             read_until_ok ()
-        | Ok _ -> Error "Expected OK or Heartbeat, got another message"
+        | Ok sm ->
+            Error
+              (Printf.sprintf "Expected OK or Heartbeat, got %s"
+                 (ServerMessage.to_string sm))
         | Error e -> Error (Printf.sprintf "Received error: %s" e)
       in
-      send ~clock:t.clock ~timeout:default_write_timeout ~conn:c.conn cmd;
-      c.last_write <- Eio.Time.now t.clock;
-      read_until_ok ()
+      match
+        send ~clock:t.clock ~timeout:default_write_timeout ~conn:c.conn cmd;
+        c.last_write <- Eio.Time.now t.clock;
+        read_until_ok ()
+      with
+      | Ok () -> Ok ()
+      | Error _ as error ->
+          c.healthy <- false;
+          error
+      | exception e ->
+          c.healthy <- false;
+          raise e
     in
     try Eio.Pool.use t.pool with_conn
     with e ->
