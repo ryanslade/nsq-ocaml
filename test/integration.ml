@@ -3,6 +3,13 @@ open Eio.Std
 let check_result prefix r =
   match r with Ok x -> x | Error s -> Alcotest.failf "%s: %s" prefix s
 
+let contains s sub =
+  let n = String.length sub in
+  let rec go i =
+    i + n <= String.length s && (String.sub s i n = sub || go (i + 1))
+  in
+  go 0
+
 let test_publish_and_consume env () =
   let open Nsq in
   let net = Eio.Stdenv.net env in
@@ -125,6 +132,32 @@ let test_requeue env () =
   in
   Fiber.first (fun () -> Consumer.run c) test
 
+let test_publish_after_error env () =
+  let open Nsq in
+  let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
+  Switch.run @@ fun sw ->
+  let address = Address.Host "localhost" in
+  (* A single pooled connection, so the second publish would reuse it *)
+  let p =
+    Producer.create ~sw ~net ~clock ~pool_size:1 address
+    |> check_result "Creating producer"
+  in
+  (* nsqd rejects the invalid topic name and closes the connection *)
+  (match
+     Producer.publish p (Topic.Topic "bad!topic") (Bytes.of_string "nope")
+   with
+  | Ok () -> Alcotest.fail "Expected publish to invalid topic to fail"
+  | Error e ->
+      Alcotest.(check bool)
+        "error includes server detail" true
+        (contains e "ErrorBadTopic"));
+  let res =
+    Producer.publish p (Topic.Topic "IntegrationAfterError")
+      (Bytes.of_string "ok")
+  in
+  check_result "Publish after error" res
+
 let () =
   Eio_main.run @@ fun env ->
   Alcotest.run "integration"
@@ -135,5 +168,7 @@ let () =
             (test_publish_and_consume env);
           Alcotest.test_case "lookupd discovery" `Quick (test_lookupd_mode env);
           Alcotest.test_case "requeue redelivery" `Slow (test_requeue env);
+          Alcotest.test_case "publish after error" `Quick
+            (test_publish_after_error env);
         ] );
     ]
