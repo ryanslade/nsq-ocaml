@@ -132,31 +132,159 @@ let test_requeue env () =
   in
   Fiber.first (fun () -> Consumer.run c) test
 
-let test_publish_after_error env () =
+(* Runs a publish that nsqd rejects and checks the error, then checks the next
+   publish succeeds. The pool has one connection, so the second publish would
+   reuse the connection nsqd closed if it were kept. *)
+let check_publish_recovers env ~bad_publish ~check_error () =
   let open Nsq in
   let net = Eio.Stdenv.net env in
   let clock = Eio.Stdenv.clock env in
   Switch.run @@ fun sw ->
-  let address = Address.Host "localhost" in
-  (* A single pooled connection, so the second publish would reuse it *)
   let p =
-    Producer.create ~sw ~net ~clock ~pool_size:1 address
+    Producer.create ~sw ~net ~clock ~pool_size:1 (Address.Host "localhost")
     |> check_result "Creating producer"
   in
-  (* nsqd rejects the invalid topic name and closes the connection *)
-  (match
-     Producer.publish p (Topic.Topic "bad!topic") (Bytes.of_string "nope")
-   with
-  | Ok () -> Alcotest.fail "Expected publish to invalid topic to fail"
-  | Error e ->
-      Alcotest.(check bool)
-        "error includes server detail" true
-        (contains e "ErrorBadTopic"));
+  (match bad_publish p with
+  | Ok () -> Alcotest.fail "Expected publish to fail"
+  | Error e -> check_error e);
   let res =
     Producer.publish p (Topic.Topic "IntegrationAfterError")
       (Bytes.of_string "ok")
   in
   check_result "Publish after error" res
+
+let check_error_mentions sub e =
+  Alcotest.(check bool)
+    (Printf.sprintf "%S mentions %s" e sub)
+    true (contains e sub)
+
+let test_publish_after_bad_topic env =
+  check_publish_recovers env
+    ~bad_publish:(fun p ->
+      Nsq.Producer.publish p (Nsq.Topic.Topic "bad!topic")
+        (Bytes.of_string "nope"))
+    ~check_error:(check_error_mentions "ErrorBadTopic")
+
+let test_publish_after_empty_mpub env =
+  check_publish_recovers env
+    ~bad_publish:(fun p ->
+      Nsq.Producer.publish_multi p (Nsq.Topic.Topic "IntegrationEmptyMpub") [])
+    ~check_error:(check_error_mentions "E_BAD_BODY")
+
+let test_publish_after_oversized_message env =
+  (* One byte over nsqd's default --max-msg-size *)
+  let body = Bytes.make ((1024 * 1024) + 1) 'x' in
+  check_publish_recovers env
+    ~bad_publish:(fun p ->
+      Nsq.Producer.publish p (Nsq.Topic.Topic "IntegrationOversized") body)
+      (* nsqd replies E_BAD_MESSAGE and closes before reading the body, so
+         depending on timing we see that error or a connection reset *)
+    ~check_error:ignore
+
+(* A fake nsqd listening on a random loopback port. [handle] is run for each
+   accepted connection along with its index, starting at 0, and the connection
+   is closed when it returns. *)
+let fake_nsqd ~sw ~net handle =
+  let socket =
+    Eio.Net.listen ~sw ~backlog:5 ~reuse_addr:true net
+      (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0))
+  in
+  let port =
+    match Eio.Net.listening_addr socket with
+    | `Tcp (_, port) -> port
+    | _ -> Alcotest.fail "Expected a TCP listening address"
+  in
+  Fiber.fork_daemon ~sw (fun () ->
+      let rec loop i =
+        Eio.Net.accept_fork ~sw socket
+          ~on_error:(fun _ -> ())
+          (fun flow _ ->
+            handle i flow (Eio.Buf_read.of_flow ~max_size:(1024 * 1024) flow));
+        loop (i + 1)
+      in
+      loop 0);
+  Nsq.Address.HostPort ("127.0.0.1", port)
+
+let read_sized_body r =
+  let size = Eio.Buf_read.BE.uint32 r |> Int32.to_int in
+  ignore (Eio.Buf_read.take size r)
+
+let read_magic r = ignore (Eio.Buf_read.take 4 r)
+
+(* IDENTIFY\n, PUB <topic>\n and MPUB <topic>\n are all followed by a sized body *)
+let read_command_with_body r =
+  ignore (Eio.Buf_read.line r);
+  read_sized_body r
+
+let write_ok flow =
+  let buf = Buffer.create 10 in
+  Buffer.add_int32_be buf 6l;
+  Buffer.add_int32_be buf 0l;
+  Buffer.add_string buf "OK";
+  Eio.Flow.copy_string (Buffer.contents buf) flow
+
+(* Read and ignore everything until the client closes the connection *)
+let drain r = try Eio.Buf_read.skip max_int r with End_of_file -> ()
+
+let test_consumer_reconnects_after_silence env () =
+  let open Nsq in
+  let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
+  Switch.run @@ fun sw ->
+  let connections = Eio.Stream.create 10 in
+  (* Complete the handshake, then never send anything again. Without a read
+     timeout the consumer would wait on this connection forever. *)
+  let address =
+    fake_nsqd ~sw ~net (fun i flow r ->
+        Eio.Stream.add connections i;
+        read_magic r;
+        read_command_with_body r;
+        write_ok flow;
+        ignore (Eio.Buf_read.line r);
+        (* SUB *)
+        write_ok flow;
+        drain r)
+  in
+  let config =
+    Consumer.Config.create ~heartbeat_interval:(Seconds.of_float 1.0)
+      ~read_timeout:(Seconds.of_float 1.5) ()
+    |> check_result "Config"
+  in
+  let c =
+    Consumer.create ~net ~clock ~config [ address ] (Topic.Topic "Silent")
+      (Channel.Channel "silent") (fun _ -> `Ok)
+  in
+  let test () =
+    Eio.Time.with_timeout_exn clock 30.0 (fun () ->
+        Alcotest.(check int) "first connection" 0 (Eio.Stream.take connections);
+        Alcotest.(check int) "reconnected" 1 (Eio.Stream.take connections))
+  in
+  Fiber.first (fun () -> Consumer.run c) test
+
+let test_producer_reconnects_after_drop env () =
+  let open Nsq in
+  let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
+  Switch.run @@ fun sw ->
+  (* The first connection is closed after reading a publish, without replying.
+     Later connections reply OK. *)
+  let address =
+    fake_nsqd ~sw ~net (fun i flow r ->
+        read_magic r;
+        read_command_with_body r;
+        if i > 0 then write_ok flow)
+  in
+  Switch.run @@ fun sw ->
+  let p =
+    Producer.create ~sw ~net ~clock ~pool_size:1 address
+    |> check_result "Creating producer"
+  in
+  let topic = Topic.Topic "Dropped" in
+  let payload = Bytes.of_string "message" in
+  (match Producer.publish p topic payload with
+  | Ok () -> Alcotest.fail "Expected publish on dropped connection to fail"
+  | Error _ -> ());
+  check_result "Publish after drop" (Producer.publish p topic payload)
 
 let () =
   Eio_main.run @@ fun env ->
@@ -168,7 +296,16 @@ let () =
             (test_publish_and_consume env);
           Alcotest.test_case "lookupd discovery" `Quick (test_lookupd_mode env);
           Alcotest.test_case "requeue redelivery" `Slow (test_requeue env);
-          Alcotest.test_case "publish after error" `Quick
-            (test_publish_after_error env);
+          Alcotest.test_case "publish after bad topic" `Quick
+            (test_publish_after_bad_topic env);
+          Alcotest.test_case "publish after empty multi publish" `Quick
+            (test_publish_after_empty_mpub env);
+          Alcotest.test_case "publish after oversized message" `Quick
+            (test_publish_after_oversized_message env);
+          Alcotest.test_case "producer reconnects after dropped connection"
+            `Quick
+            (test_producer_reconnects_after_drop env);
+          Alcotest.test_case "consumer reconnects after silent connection" `Slow
+            (test_consumer_reconnects_after_silence env);
         ] );
     ]
